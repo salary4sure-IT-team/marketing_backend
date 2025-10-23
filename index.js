@@ -25,18 +25,25 @@ app.set("trust proxy", true);
 // CORS configuration
 var corsOption = {
     origin: [
-        "http://localhost:3000/",
-        "http://localhost:5173/",
+        "http://localhost:3000",
+        "http://localhost:5173",
         "https://www.marketing.salary4sure.com",
         "https://marketing.salary4sure.com",
-        "https://localhost:5173/",
+        "http://api2.salary4sure.com",
+        "https://api2.salary4sure.com",
     ],
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     credentials: true,
     preflightContinue: false,
     optionsSuccessStatus: 204,
 };
-app.use(cors(corsOption));
+// CORS middleware with additional options
+app.use(cors({
+    ...corsOption,
+    optionsSuccessStatus: 200, // Some legacy browsers (IE11, various SmartTVs) choke on 204
+    allowedHeaders: ['Content-Type', 'Authorization', 'Auth', 'Authtoken', 'X-Requested-With'],
+    exposedHeaders: ['Content-Length', 'X-Foo', 'X-Bar']
+}));
 app.use(cookieParser()); //cookie parser middlerware
 // app.use(
 //     session({
