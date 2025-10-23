@@ -27,6 +27,18 @@ const router = express.Router();
  *         schema:
  *           type: string
  *         description: Search term for customer name or email
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: Start date (YYYY-MM-DD) for filtering by creation date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *         description: End date (YYYY-MM-DD) for filtering by creation date
  *     responses:
  *       200:
  *         description: Customer profiles retrieved successfully
@@ -52,12 +64,31 @@ const router = express.Router();
  *                       type: integer
  *                     total:
  *                       type: integer
+ *                     hasMore:
+ *                       type: boolean
+ *                 dateRange:
+ *                   type: object
+ *                   properties:
+ *                     startDate:
+ *                       type: string
+ *                     endDate:
+ *                       type: string
+ *       400:
+ *         description: Invalid date format or parameters
  *       500:
  *         description: Server error
  */
 router.get("/profile", async (req, res) => {
     try {
-        const { limit = 100, offset = 0, search } = req.query;
+        const { limit = 100, offset = 0, search, startDate, endDate } = req.query;
+        
+        // Parse and validate limit/offset
+        let limitNum = parseInt(limit) || 100;
+        let offsetNum = parseInt(offset) || 0;
+        
+        if (isNaN(limitNum) || limitNum < 1) limitNum = 100;
+        if (isNaN(offsetNum) || offsetNum < 0) offsetNum = 0;
+        if (limitNum > 1000) limitNum = 1000; // Max limit for performance
         
         // Simple query first - no pagination
         let query = "SELECT * FROM customer_profile";
@@ -73,6 +104,38 @@ router.get("/profile", async (req, res) => {
             searchParams = [searchTerm, searchTerm, searchTerm, searchTerm];
         }
         
+        // Add date range filtering if both dates provided
+        if (startDate && endDate) {
+            // Validate date format (YYYY-MM-DD)
+            const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+            if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Date format must be YYYY-MM-DD"
+                });
+            }
+            
+            // Validate date range
+            if (new Date(startDate) > new Date(endDate)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Start date must be before or equal to end date"
+                });
+            }
+            
+            // Add date filter to existing WHERE clause or create new one
+            const dateClause = "DATE(cp_created_at) BETWEEN ? AND ?";
+            if (search) {
+                query += " AND " + dateClause;
+                countQuery += " AND " + dateClause;
+                searchParams.push(startDate, endDate);
+            } else {
+                query += " WHERE " + dateClause;
+                countQuery += " WHERE " + dateClause;
+                searchParams = [startDate, endDate];
+            }
+        }
+        
         // Add simple LIMIT without OFFSET first
         query += " ORDER BY cp_id DESC LIMIT 10";
         
@@ -84,12 +147,22 @@ router.get("/profile", async (req, res) => {
         
         const total = countResult[0]?.total || 0;
         
-        res.json({
+        const response = {
             success: true,
             data: data,
             count: data.length,
             total: total
-        });
+        };
+        
+        // Add date range info if provided
+        if (startDate && endDate) {
+            response.dateRange = {
+                startDate: startDate,
+                endDate: endDate
+            };
+        }
+        
+        res.json(response);
         
     } catch (error) {
         console.error("Customer profile query error:", error);
