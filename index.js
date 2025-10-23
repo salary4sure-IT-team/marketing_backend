@@ -25,8 +25,11 @@ app.set("trust proxy", true);
 // CORS configuration
 var corsOption = {
     origin: [
+        "http://localhost:3000/",
+        "http://localhost:5173/",
         "https://www.marketing.salary4sure.com",
         "https://marketing.salary4sure.com",
+        "https://localhost:5173/",
     ],
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     credentials: true,
