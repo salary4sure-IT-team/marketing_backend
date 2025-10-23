@@ -11,6 +11,7 @@ import swaggerUi from "swagger-ui-express";
 import { swaggerSpec } from "./swagger/swaggerConfig.js";
 import exampleRoutes from "./routes/exampleRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
+import reportRoutes from "./routes/reportRoutes.js";
 
 const PORT = process.env.PORT || 3000;
 
@@ -84,6 +85,9 @@ app.use("/api/example", exampleRoutes);
 
 // Customer routes for fetching customer data
 app.use("/api/customers", customerRoutes);
+
+// Report routes for fetching lead reports
+app.use("/api/reports", reportRoutes);
 
 /**
  * @swagger
