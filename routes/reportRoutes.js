@@ -86,11 +86,25 @@ router.get("/leads", async (req, res) => {
         const totalLeadsQuery = `
             SELECT COUNT(*) as total 
             FROM leads 
-            WHERE DATE(created_on) BETWEEN ? AND ?
+            WHERE DATE(created_on) BETWEEN ? AND ? 
         `;
         
         const [totalLeadsResult] = await executeQuery(totalLeadsQuery, [startDate, endDate]);
+        console.log(totalLeadsResult);
         const totalLeads = totalLeadsResult?.total || 0;
+
+
+        // Query for total marketing leads
+        // Query for total leads within date range
+        const totalMarketingLeadsQuery = `
+            SELECT COUNT(*) as total 
+            FROM leads 
+            WHERE DATE(created_on) BETWEEN ? AND ? AND utm_campaign = '120237694055210170'
+        `;
+        
+        const [totalMarketingLeadsResult] = await executeQuery(totalMarketingLeadsQuery, [startDate, endDate]);
+        console.log(totalMarketingLeadsResult);
+        const totalMarketingLeads = totalMarketingLeadsResult?.total || 0;
 
         // Query for quality leads
         // Quality leads: utm_campaign = '120237694055210170' AND monthly_salary_amount > 35000
@@ -114,14 +128,45 @@ router.get("/leads", async (req, res) => {
         
         const qualityLeads = qualityLeadsResult?.quality || 0;
 
+        
+
         // Calculate conversion rate
         const conversionRate = totalLeads > 0 ? ((qualityLeads / totalLeads) * 100).toFixed(1) : 0;
+
+        // Quaery for coversion leads which are disbursed
+        const conversionLeadsQuery = `
+            SELECT COUNT(*) as conversion 
+            FROM leads 
+            WHERE DATE(created_on) BETWEEN ? AND ?
+            AND utm_campaign = ?
+            AND monthly_salary_amount > ?
+            AND status = 'DISBURSED'
+        `;
+        
+        const [conversionLeadsResult] = await executeQuery(conversionLeadsQuery, [startDate, endDate, utmCampaignId, minSalary]);
+        console.log(conversionLeadsResult);
+        const conversionLeads = conversionLeadsResult?.conversion || 0;
+
+        const sumLoanAmountQuery = `
+  SELECT 
+    SUM(loan_amount) AS total_loan_amount
+  FROM leads
+  WHERE DATE(created_on) BETWEEN ? AND ?
+    AND utm_campaign = '120237694055210170';
+`;
+
+        const [sumLoanAmountResult] = await executeQuery(sumLoanAmountQuery, [startDate, endDate]);
+        console.log(sumLoanAmountResult);
+        const sumLoanAmount = sumLoanAmountResult?.total_loan_amount || 0;
 
         res.json({
             success: true,
             totalLeads,
+            totalMarketingLeads,
             qualityLeads,
-            conversionRate: parseFloat(conversionRate)
+            conversionRate: parseFloat(conversionRate),
+            conversionLeads,
+            sumLoanAmount
         });
 
     } catch (error) {
