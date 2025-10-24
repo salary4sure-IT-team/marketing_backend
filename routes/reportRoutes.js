@@ -48,6 +48,10 @@ const router = express.Router();
  *                   type: integer
  *                   description: Total number of leads in the specified date range
  *                   example: 963
+ *                 totalMarketingLeads:
+ *                   type: integer
+ *                   description: Total number of marketing leads (utm_campaign = '120237694055210170')
+ *                   example: 335
  *                 qualityLeads:
  *                   type: integer
  *                   description: Number of quality leads based on criteria
@@ -56,6 +60,14 @@ const router = express.Router();
  *                   type: number
  *                   description: Conversion rate percentage
  *                   example: 18.0
+ *                 conversionLeads:
+ *                   type: integer
+ *                   description: Number of leads that were disbursed
+ *                   example: 14
+ *                 sumLoanAmount:
+ *                   type: number
+ *                   description: Sum of recommended amounts from loan table for marketing leads
+ *                   example: 368882
  *       400:
  *         description: Invalid date format or missing dates
  *       500:
@@ -149,10 +161,11 @@ router.get("/leads", async (req, res) => {
 
         const sumLoanAmountQuery = `
   SELECT 
-    SUM(loan_amount) AS total_loan_amount
-  FROM leads
-  WHERE DATE(created_on) BETWEEN ? AND ?
-    AND utm_campaign = '120237694055210170';
+    SUM(l.recommended_amount) AS total_loan_amount
+  FROM leads le
+  LEFT JOIN loan l ON le.lead_id = l.lead_id
+  WHERE DATE(le.created_on) BETWEEN ? AND ?
+    AND le.utm_campaign = '120237694055210170';
 `;
 
         const [sumLoanAmountResult] = await executeQuery(sumLoanAmountQuery, [startDate, endDate]);
