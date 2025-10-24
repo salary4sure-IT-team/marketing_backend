@@ -53,6 +53,28 @@ const router = express.Router();
  *                   type: array
  *                   items:
  *                     type: object
+ *                     properties:
+ *                       cp_id:
+ *                         type: integer
+ *                       cp_first_name:
+ *                         type: string
+ *                       cp_sur_name:
+ *                         type: string
+ *                       cp_mobile:
+ *                         type: string
+ *                       cp_personal_email:
+ *                         type: string
+ *                       cp_journey_stage:
+ *                         type: string
+ *                       journey_stage_name:
+ *                         type: string
+ *                         description: Human-readable journey stage name
+ *                       journey_stage_code:
+ *                         type: string
+ *                         description: Journey stage code
+ *                       journey_stage_active:
+ *                         type: integer
+ *                         description: Whether the journey stage is active
  *                 count:
  *                   type: integer
  *                 pagination:
@@ -90,15 +112,17 @@ router.get("/profile", async (req, res) => {
         if (isNaN(offsetNum) || offsetNum < 0) offsetNum = 0;
         if (limitNum > 1000) limitNum = 1000; // Max limit for performance
         
-        // Simple query first - no pagination
-        let query = "SELECT * FROM customer_profile";
+        // Simple query first - no pagination with JOIN
+        let query = `SELECT cp.*, mjs.m_journey_stage as journey_stage_name, mjs.m_journey_code as journey_stage_code, mjs.m_journey_active as journey_stage_active
+                     FROM customer_profile cp 
+                     LEFT JOIN master_journey_stage mjs ON cp.cp_journey_stage = mjs.m_journey_id`;
         let countQuery = "SELECT COUNT(*) as total FROM customer_profile";
         let searchParams = [];
         
         // Add search functionality if search term provided
         if (search) {
             const searchTerm = `%${search}%`;
-            const whereClause = " WHERE cp_first_name LIKE ? OR cp_sur_name LIKE ? OR cp_mobile LIKE ? OR cp_personal_email LIKE ?";
+            const whereClause = " WHERE cp.cp_first_name LIKE ? OR cp.cp_sur_name LIKE ? OR cp.cp_mobile LIKE ? OR cp.cp_personal_email LIKE ?";
             query += whereClause;
             countQuery += whereClause;
             searchParams = [searchTerm, searchTerm, searchTerm, searchTerm];
@@ -124,7 +148,7 @@ router.get("/profile", async (req, res) => {
             }
             
             // Add date filter to existing WHERE clause or create new one
-            const dateClause = "DATE(cp_created_at) BETWEEN ? AND ?";
+            const dateClause = "DATE(cp.cp_created_at) BETWEEN ? AND ?";
             if (search) {
                 query += " AND " + dateClause;
                 countQuery += " AND " + dateClause;
@@ -137,7 +161,7 @@ router.get("/profile", async (req, res) => {
         }
         
         // Add simple LIMIT without OFFSET first
-        query += " ORDER BY cp_id DESC LIMIT 10";
+        query += " ORDER BY cp.cp_id DESC LIMIT 100";
         
         // Execute queries
         const [data, countResult] = await Promise.all([
