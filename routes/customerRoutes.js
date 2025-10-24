@@ -149,13 +149,14 @@ router.get("/profile", async (req, res) => {
             
             // Add date filter to existing WHERE clause or create new one
             const dateClause = "DATE(cp.cp_created_at) BETWEEN ? AND ?";
+            const countDateClause = "DATE(cp_created_at) BETWEEN ? AND ?";
             if (search) {
                 query += " AND " + dateClause;
-                countQuery += " AND " + dateClause;
+                countQuery += " AND " + countDateClause;
                 searchParams.push(startDate, endDate);
             } else {
                 query += " WHERE " + dateClause;
-                countQuery += " WHERE " + dateClause;
+                countQuery += " WHERE " + countDateClause;
                 searchParams = [startDate, endDate];
             }
         }
