@@ -299,4 +299,73 @@ router.get("/stats", async (req, res) => {
     }
 });
 
+/**
+ * @swagger
+ * /api/customers/by-state:
+ *   get:
+ *     summary: Get customer count by state
+ *     tags: [Customers]
+ *     description: Returns a simple key-value object with state names and customer counts
+ *     responses:
+ *       200:
+ *         description: Customer count by state
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: integer
+ *                   example:
+ *                     "Bihar": 50
+ *                     "Maharashtra": 30
+ *                     "Delhi": 25
+ *       500:
+ *         description: Server error
+ */
+router.get("/by-state", async (req, res) => {
+    try {
+        // Simple query to get all customers with state information
+        const query = `SELECT 
+                        ms.m_state_name as state_name
+                     FROM customer_profile cp 
+                     LEFT JOIN master_city mc ON cp.cp_residence_city_id = mc.m_city_id
+                     LEFT JOIN master_state ms ON mc.m_city_state_id = ms.m_state_id
+                     WHERE cp.cp_residence_city_id IS NOT NULL`;
+        
+        // Execute query
+        const customers = await executeQuery(query);
+        
+        // Group customers by state and count them
+        const stateCounts = {};
+        
+        customers.forEach(customer => {
+            const stateName = customer.state_name || 'Unknown State';
+            
+            if (!stateCounts[stateName]) {
+                stateCounts[stateName] = 0;
+            }
+            stateCounts[stateName]++;
+        });
+        
+        res.json({
+            success: true,
+            data: stateCounts
+        });
+        
+    } catch (error) {
+        console.error("Customer by state query error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch customers by state",
+            error: error.message
+        });
+    }
+});
+
+
 export default router;
