@@ -6,6 +6,19 @@ import InstantFormLead from '../models/InstantFormLead.js';
 
 const router = express.Router();
 
+// Middleware to handle JSON parsing errors for this route
+router.use('/upload', (err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        console.error('❌ JSON parsing error:', err.message);
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid request format. Please use multipart/form-data for file uploads',
+            error: 'JSON parsing error - use multipart/form-data instead'
+        });
+    }
+    next(err);
+});
+
 // Configure multer for file upload
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
@@ -30,15 +43,45 @@ const upload = multer({
         }
     },
     limits: {
-        fileSize: 10 * 1024 * 1024 // 10MB limit
+        fileSize: 10 * 1024 * 1024, // 10MB limit
+        files: 5 // Maximum 5 files
+    },
+    onError: function (err, next) {
+        console.error('❌ Multer error:', err.message);
+        next(err);
     }
 });
 
 // POST /api/instant-leads/upload
-router.post('/upload', upload.any(), async (req, res) => {
+router.post('/upload', (req, res, next) => {
+    upload.any()(req, res, (err) => {
+        if (err) {
+            console.error('❌ Multer error:', err.message);
+            return res.status(400).json({
+                success: false,
+                message: 'File upload error',
+                error: err.message,
+                code: err.code
+            });
+        }
+        next();
+    });
+}, async (req, res) => {
     try {
+        // Log request details for debugging
+        console.log('📁 Content-Type:', req.get('Content-Type'));
         console.log('📁 Request body fields:', Object.keys(req.body));
         console.log('📁 Request files:', req.files ? req.files.length : 'No files');
+        
+        // Check if request is multipart/form-data
+        const contentType = req.get('Content-Type');
+        if (!contentType || !contentType.includes('multipart/form-data')) {
+            return res.status(400).json({
+                success: false,
+                message: 'Content-Type must be multipart/form-data for file uploads',
+                receivedContentType: contentType
+            });
+        }
         
         // Find the Excel file from uploaded files
         let excelFile = null;

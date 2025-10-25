@@ -65,10 +65,6 @@ out/
 .eslintcache
 .stylelintcache
 
-# Temporary files
-tmp/
-temp/
-*.tmp
 
 # Package manager
 package-lock.json

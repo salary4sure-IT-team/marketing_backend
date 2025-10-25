@@ -59,7 +59,17 @@ app.use(cookieParser()); //cookie parser middlerware
 //         },
 //     })
 // );
-app.use(express.json());
+// JSON parsing middleware - conditional based on content type
+app.use((req, res, next) => {
+    const contentType = req.get('Content-Type');
+    if (contentType && contentType.includes('multipart/form-data')) {
+        // Skip JSON parsing for multipart requests
+        return next();
+    }
+    // Apply JSON parsing for other requests
+    express.json()(req, res, next);
+});
+
 app.use(express.urlencoded({ extended: true }));
 
 // Logging middleware (optional)
