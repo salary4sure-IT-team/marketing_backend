@@ -127,6 +127,25 @@ app.get("/health", (req, res) => {
 
 // Error handling middleware
 app.use(notFound);
+
+// Special error handler for JSON parsing errors
+app.use((err, req, res, next) => {
+    if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+        console.error('❌ JSON parsing error on route:', req.path);
+        console.error('❌ Content-Type:', req.get('Content-Type'));
+        console.error('❌ Error:', err.message);
+        
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid request format. For file uploads, use multipart/form-data',
+            error: 'JSON parsing error - ensure Content-Type is multipart/form-data',
+            route: req.path,
+            receivedContentType: req.get('Content-Type')
+        });
+    }
+    next(err);
+});
+
 app.use(errorHandler);
 
 app.listen(PORT, () => {

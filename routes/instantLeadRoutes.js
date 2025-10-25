@@ -6,6 +6,13 @@ import InstantFormLead from '../models/InstantFormLead.js';
 
 const router = express.Router();
 
+// Middleware to completely bypass JSON parsing for upload route
+router.use('/upload', (req, res, next) => {
+    // Skip all body parsing middleware for this route
+    req._skipBodyParsing = true;
+    next();
+});
+
 // Middleware to handle JSON parsing errors for this route
 router.use('/upload', (err, req, res, next) => {
     if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
@@ -52,9 +59,37 @@ const upload = multer({
     }
 });
 
-// POST /api/instant-leads/upload
+// POST /api/instant-leads/upload - Raw route without JSON parsing
 router.post('/upload', (req, res, next) => {
-    upload.any()(req, res, (err) => {
+    // Create a new multer instance specifically for this route
+    const uploadMiddleware = multer({ 
+        storage: multer.diskStorage({
+            destination: function (req, file, cb) {
+                cb(null, 'uploads/');
+            },
+            filename: function (req, file, cb) {
+                const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+                cb(null, 'instant-leads-' + uniqueSuffix + '.xlsx');
+            }
+        }),
+        fileFilter: function (req, file, cb) {
+            console.log('📁 File received:', file.fieldname, file.originalname, file.mimetype);
+            if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                file.mimetype === 'application/vnd.ms-excel' ||
+                file.originalname.match(/\.(xlsx|xls)$/)) {
+                cb(null, true);
+            } else {
+                cb(new Error('Only Excel files are allowed!'), false);
+            }
+        },
+        limits: {
+            fileSize: 10 * 1024 * 1024, // 10MB limit
+            files: 5 // Maximum 5 files
+        }
+    });
+    
+    // Apply multer middleware
+    uploadMiddleware.any()(req, res, (err) => {
         if (err) {
             console.error('❌ Multer error:', err.message);
             return res.status(400).json({
