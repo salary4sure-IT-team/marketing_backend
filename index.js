@@ -12,6 +12,7 @@ import { swaggerSpec } from "./swagger/swaggerConfig.js";
 import exampleRoutes from "./routes/exampleRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
+import instantLeadRoutes from "./routes/instantLeadRoutes.js";
 
 const PORT = process.env.PORT || 3000;
 
@@ -88,6 +89,9 @@ app.use("/api/customers", customerRoutes);
 
 // Report routes for fetching lead reports
 app.use("/api/reports", reportRoutes);
+
+// Instant form leads routes for Excel upload and processing
+app.use("/api/instant-leads", instantLeadRoutes);
 
 /**
  * @swagger
