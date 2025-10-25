@@ -20,8 +20,10 @@ const storage = multer.diskStorage({
 const upload = multer({ 
     storage: storage,
     fileFilter: function (req, file, cb) {
+        console.log('📁 File received:', file.fieldname, file.originalname, file.mimetype);
         if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-            file.mimetype === 'application/vnd.ms-excel') {
+            file.mimetype === 'application/vnd.ms-excel' ||
+            file.originalname.match(/\.(xlsx|xls)$/)) {
             cb(null, true);
         } else {
             cb(new Error('Only Excel files are allowed!'), false);
@@ -33,24 +35,39 @@ const upload = multer({
 });
 
 // POST /api/instant-leads/upload
-router.post('/upload', upload.single('excelFile'), async (req, res) => {
+router.post('/upload', upload.any(), async (req, res) => {
     try {
-        if (!req.file) {
+        console.log('📁 Request body fields:', Object.keys(req.body));
+        console.log('📁 Request files:', req.files ? req.files.length : 'No files');
+        
+        // Find the Excel file from uploaded files
+        let excelFile = null;
+        if (req.files && req.files.length > 0) {
+            excelFile = req.files.find(file => 
+                file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+                file.mimetype === 'application/vnd.ms-excel' ||
+                file.originalname.match(/\.(xlsx|xls)$/)
+            );
+        }
+        
+        if (!excelFile) {
             return res.status(400).json({
                 success: false,
-                message: 'No Excel file uploaded'
+                message: 'No Excel file uploaded. Please upload a .xlsx or .xls file'
             });
         }
+        
+        console.log('📁 Excel file found:', excelFile.fieldname, excelFile.originalname);
 
         const { uploadedBy } = req.body;
         
         // Read Excel file
-        console.log('📁 File uploaded to:', req.file.path);
-        console.log('📁 File exists:', fs.existsSync(req.file.path));
+        console.log('📁 File uploaded to:', excelFile.path);
+        console.log('📁 File exists:', fs.existsSync(excelFile.path));
         
         let workbook, jsonData;
         try {
-            workbook = xlsx.readFile(req.file.path);
+            workbook = xlsx.readFile(excelFile.path);
             const sheetName = workbook.SheetNames[0];
             const worksheet = workbook.Sheets[sheetName];
             jsonData = xlsx.utils.sheet_to_json(worksheet);
@@ -119,11 +136,15 @@ router.post('/upload', upload.single('excelFile'), async (req, res) => {
             }
         }
 
-        // Clean up uploaded file
+        // Clean up uploaded files
         try {
-            if (fs.existsSync(req.file.path)) {
-                fs.unlinkSync(req.file.path);
-                console.log('🗑️ Uploaded file cleaned up:', req.file.path);
+            if (req.files && req.files.length > 0) {
+                req.files.forEach(file => {
+                    if (fs.existsSync(file.path)) {
+                        fs.unlinkSync(file.path);
+                        console.log('🗑️ Uploaded file cleaned up:', file.path);
+                    }
+                });
             }
         } catch (cleanupError) {
             console.error('⚠️ File cleanup error:', cleanupError.message);
@@ -137,6 +158,7 @@ router.post('/upload', upload.single('excelFile'), async (req, res) => {
                 processedLeads: processedLeads.length,
                 duplicates: duplicates.length,
                 errors: errors.length,
+                excelFileName: excelFile.originalname,
                 excelHeaders: Object.keys(jsonData[0]),
                 details: {
                     leads: processedLeads.map(lead => ({
