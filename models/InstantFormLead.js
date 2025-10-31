@@ -111,6 +111,11 @@ const instantFormLeadSchema = new mongoose.Schema({
         type: Number,
         default: null
     },
+    uploadHistoryId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'ExcelUploadHistory',
+        required: true
+    },
     
     // Duplicate handling
     is_duplicate: {
@@ -137,6 +142,12 @@ const instantFormLeadSchema = new mongoose.Schema({
     }
 }, {
     timestamps: true
+}, {
+    budget: {
+        type: Number,
+        required: true,
+        default: null
+    }
 });
 
 // Pre-save middleware to set salary_numeric_value

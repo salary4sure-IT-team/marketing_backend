@@ -3,6 +3,7 @@ import multer from 'multer';
 import xlsx from 'xlsx';
 import fs from 'fs';
 import InstantFormLead from '../models/InstantFormLead.js';
+import ExcelUploadHistory from '../models/ExcelUploadHistory.js';
 
 const router = express.Router();
 
@@ -137,7 +138,8 @@ router.post('/upload', (req, res, next) => {
         
         console.log('📁 Excel file found:', excelFile.fieldname, excelFile.originalname);
 
-        const { uploadedBy } = req.body;
+        const { uploadedBy, budget } = req.body;
+        console.log('💰 Budget received:', budget)
         
         // Read Excel file
         console.log('📁 File uploaded to:', excelFile.path);
@@ -168,6 +170,20 @@ router.post('/upload', (req, res, next) => {
         console.log('📊 Excel data loaded:', jsonData.length, 'rows');
         console.log('📋 All headers found:', Object.keys(jsonData[0]));
 
+        // Create upload history record
+        const uploadHistory = await ExcelUploadHistory.create({
+            fileName: excelFile.originalname,
+            uploadedAt: new Date(),
+            budget: budget ? Number(budget) : 0,
+            uploadedBy: uploadedBy || 'unknown',
+            totalRows: jsonData.length,
+            processedLeads: 0,
+            duplicates: 0,
+            errors: 0
+        });
+
+        console.log('📝 Created upload history record:', uploadHistory._id);
+
         // Process each row
         const processedLeads = [];
         const duplicates = [];
@@ -180,7 +196,7 @@ router.post('/upload', (req, res, next) => {
             try {
                 // Extract ALL data from Excel row dynamically
                 const leadData = extractAllFields(row, rowNumber);
-                
+
                 // Basic validation for required fields
                 if (!leadData.phone_number || leadData.phone_number.length < 10) {
                     errors.push(`Row ${rowNumber}: Invalid phone number`);
@@ -189,7 +205,7 @@ router.post('/upload', (req, res, next) => {
 
                 // Check for duplicates
                 const duplicateCheck = await checkForDuplicates(leadData);
-                
+
                 if (duplicateCheck.isDuplicate) {
                     leadData.is_duplicate = true;
                     leadData.duplicate_reason = duplicateCheck.reason;
@@ -201,6 +217,8 @@ router.post('/upload', (req, res, next) => {
                         reason: duplicateCheck.reason
                     });
                 }
+                leadData.budget = budget ? Number(budget) : null;
+                leadData.uploadHistoryId = uploadHistory._id; // Link to upload history
 
                 // Store in MongoDB
                 const savedLead = await InstantFormLead.create(leadData);
@@ -213,6 +231,13 @@ router.post('/upload', (req, res, next) => {
                 console.error(`❌ Row ${rowNumber} error:`, error.message);
             }
         }
+
+        // Update upload history with final counts
+        await ExcelUploadHistory.findByIdAndUpdate(uploadHistory._id, {
+            processedLeads: processedLeads.length,
+            duplicates: duplicates.length,
+            errors: errors.length
+        });
 
         // Clean up uploaded files
         try {
@@ -232,6 +257,7 @@ router.post('/upload', (req, res, next) => {
             success: true,
             message: 'Excel file processed successfully',
             data: {
+                uploadHistoryId: uploadHistory._id,
                 totalRows: jsonData.length,
                 processedLeads: processedLeads.length,
                 duplicates: duplicates.length,
@@ -467,7 +493,7 @@ router.get('/duplicates', async (req, res) => {
 router.get('/fields', async (req, res) => {
     try {
         const sampleLead = await InstantFormLead.findOne({});
-        
+
         if (!sampleLead) {
             return res.json({
                 success: true,
@@ -502,6 +528,127 @@ router.get('/fields', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Error fetching field names',
+            error: error.message
+        });
+    }
+});
+
+// GET /api/instant-leads/history - Get upload history for frontend display
+router.get('/history', async (req, res) => {
+    try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const total = await ExcelUploadHistory.countDocuments();
+        const history = await ExcelUploadHistory.find({})
+            .sort({ uploadedAt: -1 })
+            .skip(skip)
+            .limit(limit);
+
+        res.json({
+            success: true,
+            data: {
+                history,
+                pagination: {
+                    currentPage: page,
+                    totalPages: Math.ceil(total / limit),
+                    totalRecords: total,
+                    hasNext: page * limit < total,
+                    hasPrev: page > 1
+                }
+            }
+        });
+
+    } catch (error) {
+        console.error('Get history error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching upload history',
+            error: error.message
+        });
+    }
+});
+
+// PUT /api/instant-leads/history/:id - Update budget amount
+router.put('/history/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { budget } = req.body;
+
+        if (budget === undefined || budget === null) {
+            return res.status(400).json({
+                success: false,
+                message: 'Budget is required'
+            });
+        }
+
+        const updatedHistory = await ExcelUploadHistory.findByIdAndUpdate(
+            id,
+            { budget: Number(budget) },
+            { new: true, runValidators: true }
+        );
+
+        if (!updatedHistory) {
+            return res.status(404).json({
+                success: false,
+                message: 'Upload history not found'
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Budget updated successfully',
+            data: updatedHistory
+        });
+
+    } catch (error) {
+        console.error('Update budget error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error updating budget',
+            error: error.message
+        });
+    }
+});
+
+
+
+// DELETE /api/instant-leads/history/:id - Delete history and associated leads
+router.delete('/history/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        // Check if history exists
+        const history = await ExcelUploadHistory.findById(id);
+        if (!history) {
+            return res.status(404).json({
+                success: false,
+                message: 'Upload history not found'
+            });
+        }
+
+        // Delete associated leads first
+        const deletedLeads = await InstantFormLead.deleteMany({ uploadHistoryId: id });
+        console.log(`🗑️ Deleted ${deletedLeads.deletedCount} leads for history ${id}`);
+
+        // Delete history record
+        await ExcelUploadHistory.findByIdAndDelete(id);
+
+        res.json({
+            success: true,
+            message: 'Upload history and associated leads deleted successfully',
+            data: {
+                deletedHistoryId: id,
+                deletedLeadsCount: deletedLeads.deletedCount
+            }
+        });
+
+    } catch (error) {
+        console.error('Delete history error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error deleting upload history',
             error: error.message
         });
     }
