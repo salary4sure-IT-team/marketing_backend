@@ -297,7 +297,7 @@ router.get("/leads", async (req, res) => {
             instantLeadFormData: {
                 matched: finalMatchedLeads,
                 unmatched: finalUnmatchedLeads,
-                newlyMatched: newlyMatchedCount,
+                // newlyMatched: newlyMatchedCount,
                 total: finalMatchedLeads + finalUnmatchedLeads
             }
         });
@@ -358,6 +358,53 @@ router.get("/leads/stats", async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Failed to fetch lead statistics",
+            error: error.message
+        });
+    }
+});
+
+
+router.get("/leads/unmatched", async (req, res) => {
+    try {
+
+        const { startDate, endDate } = req.query;
+
+        if (!startDate || !endDate) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date and end date are required"
+            });
+        }
+
+        // Validate date format (YYYY-MM-DD)
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+            return res.status(400).json({
+                success: false,
+                message: "Date format must be YYYY-MM-DD"
+            });
+        }
+
+        const startDateObj = new Date(startDate);
+        const endDateObj = new Date(endDate);
+        endDateObj.setHours(23, 59, 59, 999); // Set to end of day
+        const unmatchedLeads = await InstantFormLead.find({
+            matched_in_customer_profile: false,
+            uploaded_at: {
+                $gte: startDateObj,
+                $lte: endDateObj
+            },
+            phone_number: { $exists: true, $ne: null, $ne: '' }
+        });
+        res.json({
+            success: true,
+            unmatchedLeads
+        });
+    } catch (error) {
+        console.error("Error fetching unmatched leads:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch unmatched leads",
             error: error.message
         });
     }
