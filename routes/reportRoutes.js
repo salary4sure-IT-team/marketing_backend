@@ -285,6 +285,18 @@ router.get("/leads", async (req, res) => {
             matched_in_customer_profile: false
         });
 
+        
+
+        const mkins = await exceluploadhistory.find({
+            created_at: {
+                $gte: startDateObj,
+                $lte: endDateObj
+            },
+            budget: { $exists: true, $ne: null, $ne: '' },
+            sumofBudget: { $sum: "$budget" }
+        });
+        console.log(mkins);
+
         res.json({
             success: true,
             totalLeads,
@@ -299,7 +311,8 @@ router.get("/leads", async (req, res) => {
                 unmatched: finalUnmatchedLeads,
                 // newlyMatched: newlyMatchedCount,
                 total: finalMatchedLeads + finalUnmatchedLeads
-            }
+            },
+            marketingCostInsights : mkins
         });
 
     } catch (error) {
@@ -409,5 +422,132 @@ router.get("/leads/unmatched", async (req, res) => {
         });
     }
 });
+
+
+/**
+ * @swagger
+ * /api/reports/leads/fresh-reloan:
+ *   get:
+ *     summary: Get fresh and reloan lead counts based on user_type
+ *     tags: [Reports]
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *           example: 2025-01-01
+ *         required: true
+ *         description: Start date for the report (YYYY-MM-DD)
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *           example: 2025-12-31
+ *         required: true
+ *         description: End date for the report (YYYY-MM-DD)
+ *     responses:
+ *       200:
+ *         description: Fresh and reloan counts retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 freshCount:
+ *                   type: integer
+ *                   description: Count of leads with user_type = 'NEW' (fresh cases)
+ *                   example: 150
+ *                 reloanCount:
+ *                   type: integer
+ *                   description: Count of leads with user_type = 'REPEAT' (reloan cases)
+ *                   example: 75
+ *                 totalLeads:
+ *                   type: integer
+ *                   description: Total leads in the date range
+ *                   example: 225
+ *       400:
+ *         description: Invalid date format or missing dates
+ *       500:
+ *         description: Server error
+ */
+router.get("/leads/fresh-reloan", async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+
+        // Validate required parameters
+        if (!startDate || !endDate) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date and end date are required"
+            });
+        }
+
+        // Validate date format (YYYY-MM-DD)
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+            return res.status(400).json({
+                success: false,
+                message: "Date format must be YYYY-MM-DD"
+            });
+        }
+
+        // Query for fresh leads (user_type = 'NEW')
+        const freshCountQuery = `
+            SELECT COUNT(*) as count
+            FROM leads
+            WHERE DATE(created_on) BETWEEN ? AND ?
+              AND user_type = 'NEW'
+        `;
+
+        const [freshResult] = await executeQuery(freshCountQuery, [startDate, endDate]);
+        const freshCount = freshResult?.count || 0;
+
+        // Query for reloan leads (user_type = 'REPEAT')
+        const reloanCountQuery = `
+            SELECT COUNT(*) as count
+            FROM leads
+            WHERE DATE(created_on) BETWEEN ? AND ?
+              AND user_type = 'REPEAT'
+        `;
+
+        const [reloanResult] = await executeQuery(reloanCountQuery, [startDate, endDate]);
+        const reloanCount = reloanResult?.count || 0;
+
+        // Optional: Get total leads for reference
+        const totalLeadsQuery = `
+            SELECT COUNT(*) as count
+            FROM leads
+            WHERE DATE(created_on) BETWEEN ? AND ?
+        `;
+
+        const [totalResult] = await executeQuery(totalLeadsQuery, [startDate, endDate]);
+        const totalLeads = totalResult?.count || 0;
+
+        res.json({
+            success: true,
+            freshCount,
+            reloanCount,
+            totalLeads,
+            dateRange: {
+                startDate,
+                endDate
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching fresh/reloan counts:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch fresh/reloan counts",
+            error: error.message
+        });
+    }
+});
+
 
 export default router;

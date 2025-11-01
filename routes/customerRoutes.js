@@ -368,4 +368,134 @@ router.get("/by-state", async (req, res) => {
 });
 
 
+/**
+ * @swagger
+ * /api/customers/by-journey-stage:
+ *   get:
+ *     summary: Get customer count grouped by journey stage
+ *     tags: [Customers]
+ *     parameters:
+ *       - in: query
+ *         name: startDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *           example: 2025-01-01
+ *         required: true
+ *         description: Start date (YYYY-MM-DD) for filtering by creation date
+ *       - in: query
+ *         name: endDate
+ *         schema:
+ *           type: string
+ *           format: date
+ *           example: 2025-12-31
+ *         required: true
+ *         description: End date (YYYY-MM-DD) for filtering by creation date
+ *     responses:
+ *       200:
+ *         description: Customer count by journey stage retrieved successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 journey_stage:
+ *                   type: object
+ *                   additionalProperties:
+ *                     type: object
+ *                     properties:
+ *                       customer:
+ *                         type: integer
+ *                         description: Count of customers in this journey stage
+ *                       stage:
+ *                         type: string
+ *                         description: Journey stage name from master_journey_stage
+ *                       stage_id:
+ *                         type: integer
+ *                         description: Journey stage ID
+ *                   example:
+ *                     "8":
+ *                       customer: 10
+ *                       stage: "eKYC initiated"
+ *                     "9":
+ *                       customer: 5
+ *                       stage: "Document Upload"
+ *       400:
+ *         description: Invalid date format or missing dates
+ *       500:
+ *         description: Server error
+ */
+router.get("/by-journey-stage", async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+
+        // Validate required parameters
+        if (!startDate || !endDate) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date and end date are required"
+            });
+        }
+
+        // Validate date format (YYYY-MM-DD)
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+            return res.status(400).json({
+                success: false,
+                message: "Date format must be YYYY-MM-DD"
+            });
+        }
+
+        // Query to get customer count grouped by journey stage
+        const query = `
+            SELECT 
+                cp.cp_journey_stage as stage_id,
+                mjs.m_journey_stage as stage_name,
+                COUNT(*) as customer_count
+            FROM customer_profile cp
+            LEFT JOIN master_journey_stage mjs ON cp.cp_journey_stage = mjs.m_journey_id
+            WHERE DATE(cp.cp_created_at) BETWEEN ? AND ?
+              AND cp.cp_journey_stage IS NOT NULL
+            GROUP BY cp.cp_journey_stage, mjs.m_journey_stage
+            ORDER BY cp.cp_journey_stage ASC
+        `;
+
+        const results = await executeQuery(query, [startDate, endDate]);
+
+        // Build the response object in the requested format
+        const journeyStage = {};
+
+        results.forEach(row => {
+            const stageId = String(row.stage_id);
+            journeyStage[stageId] = {
+                customer: row.customer_count || 0,
+                stage: row.stage_name || 'Unknown Stage',
+                stage_id: row.stage_id
+            };
+        });
+
+        res.json({
+            success: true,
+            journey_stage: journeyStage,
+            dateRange: {
+                startDate,
+                endDate
+            },
+            totalStages: Object.keys(journeyStage).length,
+            totalCustomers: results.reduce((sum, row) => sum + (row.customer_count || 0), 0)
+        });
+
+    } catch (error) {
+        console.error("Customer by journey stage query error:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch customers by journey stage",
+            error: error.message
+        });
+    }
+});
+
+
 export default router;
