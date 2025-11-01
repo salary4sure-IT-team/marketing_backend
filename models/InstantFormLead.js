@@ -139,6 +139,16 @@ const instantFormLeadSchema = new mongoose.Schema({
     salary_numeric_value: {
         type: Number,
         default: 0
+    },
+    
+    // Customer profile matching
+    matched_in_customer_profile: {
+        type: Boolean,
+        default: false
+    },
+    matched_at: {
+        type: Date,
+        default: null
     }
 }, {
     timestamps: true
@@ -173,6 +183,7 @@ instantFormLeadSchema.index({ quality_lead: 1 });
 instantFormLeadSchema.index({ is_duplicate: 1 });
 instantFormLeadSchema.index({ created_time: 1 });
 instantFormLeadSchema.index({ ad_id: 1 });
+instantFormLeadSchema.index({ matched_in_customer_profile: 1 });
 
 const InstantFormLead = mongoose.model('InstantFormLead', instantFormLeadSchema);
 

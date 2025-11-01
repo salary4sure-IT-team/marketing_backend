@@ -4,6 +4,7 @@ import xlsx from 'xlsx';
 import fs from 'fs';
 import InstantFormLead from '../models/InstantFormLead.js';
 import ExcelUploadHistory from '../models/ExcelUploadHistory.js';
+import { executeQuery } from '../config/mysqlDb.js';
 
 const router = express.Router();
 
@@ -188,7 +189,9 @@ router.post('/upload', (req, res, next) => {
         const processedLeads = [];
         const duplicates = [];
         const errors = [];
+        const leadDataArray = []; // Store all lead data first
 
+        // First pass: Extract and validate all leads
         for (let i = 0; i < jsonData.length; i++) {
             const row = jsonData[i];
             const rowNumber = i + 2; // Excel row number (accounting for header)
@@ -217,14 +220,11 @@ router.post('/upload', (req, res, next) => {
                         reason: duplicateCheck.reason
                     });
                 }
+                
                 leadData.budget = budget ? Number(budget) : null;
                 leadData.uploadHistoryId = uploadHistory._id; // Link to upload history
-
-                // Store in MongoDB
-                const savedLead = await InstantFormLead.create(leadData);
-                processedLeads.push(savedLead);
-
-                console.log(`✅ Row ${rowNumber}: Processed - Phone: ${leadData.phone_number}, Duplicate: ${leadData.is_duplicate}`);
+                leadData.excel_row_number = rowNumber; // Store row number for reference
+                leadDataArray.push(leadData);
 
             } catch (error) {
                 errors.push(`Row ${rowNumber}: ${error.message}`);
@@ -232,11 +232,52 @@ router.post('/upload', (req, res, next) => {
             }
         }
 
+        // Batch check phone numbers against customer_profile
+        const phoneNumbers = leadDataArray.map(lead => lead.phone_number).filter(phone => phone);
+        const matchedPhones = await checkPhoneNumbersInCustomerProfile(phoneNumbers);
+        console.log(`✅ Found ${matchedPhones.size} matching phone numbers in customer_profile`);
+
+        // Second pass: Save leads with matching information
+        let matchedCount = 0;
+        for (const leadData of leadDataArray) {
+            try {
+                // Normalize phone number and check if it matches customer_profile
+                const normalizedPhone = normalizePhoneNumber(leadData.phone_number);
+                const isMatched = normalizedPhone && matchedPhones.has(leadData.phone_number);
+                
+                if (isMatched) {
+                    leadData.matched_in_customer_profile = true;
+                    leadData.matched_at = new Date();
+                    matchedCount++;
+                    // Only log first 5 matches per upload to avoid console spam
+                    if (matchedCount <= 5) {
+                        console.log(`✅ Match: ${leadData.phone_number} (normalized: ${normalizedPhone}) -> Matched in customer_profile`);
+                    }
+                } else {
+                    leadData.matched_in_customer_profile = false;
+                    leadData.matched_at = null;
+                }
+
+                // Store in MongoDB
+                const savedLead = await InstantFormLead.create(leadData);
+                processedLeads.push(savedLead);
+
+                console.log(`✅ Row ${leadData.excel_row_number}: Processed - Phone: ${leadData.phone_number}, Duplicate: ${leadData.is_duplicate}, Matched: ${leadData.matched_in_customer_profile}`);
+
+            } catch (error) {
+                errors.push(`Row ${leadData.excel_row_number}: ${error.message}`);
+                console.error(`❌ Row ${leadData.excel_row_number} error:`, error.message);
+            }
+        }
+
+        console.log(`📊 Upload Summary: ${processedLeads.length} processed, ${matchedCount} matched, ${duplicates.length} duplicates`);
+
         // Update upload history with final counts
         await ExcelUploadHistory.findByIdAndUpdate(uploadHistory._id, {
             processedLeads: processedLeads.length,
             duplicates: duplicates.length,
-            errors: errors.length
+            errors: errors.length,
+            matchedInCustomerProfile: matchedCount
         });
 
         // Clean up uploaded files
@@ -262,6 +303,8 @@ router.post('/upload', (req, res, next) => {
                 processedLeads: processedLeads.length,
                 duplicates: duplicates.length,
                 errors: errors.length,
+                matchedInCustomerProfile: matchedCount,
+                unmatchedInCustomerProfile: processedLeads.length - matchedCount,
                 excelFileName: excelFile.originalname,
                 excelHeaders: Object.keys(jsonData[0]),
                 details: {
@@ -273,6 +316,8 @@ router.post('/upload', (req, res, next) => {
                         full_name: lead.full_name,
                         is_duplicate: lead.is_duplicate,
                         duplicate_reason: lead.duplicate_reason,
+                        matched_in_customer_profile: lead.matched_in_customer_profile,
+                        matched_at: lead.matched_at,
                         additional_fields: Object.keys(lead.additional_data || {})
                     })),
                     duplicateList: duplicates,
@@ -359,6 +404,116 @@ function extractAllFields(row, rowNumber) {
     return leadData;
 }
 
+// Function to normalize phone number (remove country code, leading zeros, spaces, etc.)
+function normalizePhoneNumber(phone) {
+    if (!phone) return null;
+    
+    // Convert to string and remove all non-digits
+    let normalized = String(phone).replace(/\D/g, '');
+    
+    // Remove country code (91) if present and number is 12 digits
+    if (normalized.length === 12 && normalized.startsWith('91')) {
+        normalized = normalized.substring(2);
+    }
+    
+    // Remove leading zeros
+    normalized = normalized.replace(/^0+/, '');
+    
+    // Must be 10 digits for valid Indian mobile number
+    if (normalized.length !== 10) {
+        return null;
+    }
+    
+    return normalized;
+}
+
+// Function to check if phone numbers exist in MySQL customer_profile
+async function checkPhoneNumbersInCustomerProfile(phoneNumbers) {
+    try {
+        if (!phoneNumbers || phoneNumbers.length === 0) {
+            return new Set();
+        }
+
+        // Normalize and filter valid phone numbers
+        const normalizedPhonesMap = new Map(); // Map normalized -> original for lookup
+        const normalizedPhones = [];
+        
+        phoneNumbers.forEach(phone => {
+            if (!phone) return;
+            const normalized = normalizePhoneNumber(phone);
+            if (normalized && !normalizedPhonesMap.has(normalized)) {
+                normalizedPhones.push(normalized);
+                normalizedPhonesMap.set(normalized, phone);
+            }
+        });
+        
+        if (normalizedPhones.length === 0) {
+            console.log('⚠️ No valid normalized phone numbers to check');
+            return new Set();
+        }
+
+        console.log(`🔍 Checking ${normalizedPhones.length} unique phone numbers against customer_profile...`);
+        console.log(`📱 Sample phones to check: ${normalizedPhones.slice(0, 5).join(', ')}`);
+
+        // Query MySQL customer_profile for matching phone numbers
+        // Create a set of normalized phone numbers we're looking for
+        const normalizedPhonesSet = new Set(normalizedPhones);
+        
+        // Query to get customer phones and normalize them in memory
+        // For better performance with large databases, we could use a WHERE IN clause,
+        // but for accuracy, we'll normalize all and compare
+        const query = `
+            SELECT DISTINCT cp_mobile
+            FROM customer_profile
+            WHERE cp_mobile IS NOT NULL 
+              AND cp_mobile != ''
+              AND LENGTH(cp_mobile) >= 10
+        `;
+
+        const allCustomerPhones = await executeQuery(query, []);
+        console.log(`📊 Total customer profiles in database: ${allCustomerPhones.length}`);
+        
+        // Normalize all database phone numbers and create a set
+        const normalizedDbPhones = new Set();
+        let normalizedCount = 0;
+        allCustomerPhones.forEach(row => {
+            const normalized = normalizePhoneNumber(row.cp_mobile);
+            if (normalized) {
+                normalizedDbPhones.add(normalized);
+                normalizedCount++;
+            }
+        });
+        
+        console.log(`📱 Valid normalized customer phones: ${normalizedDbPhones.size}`);
+        
+        // Match normalized input phones with normalized database phones
+        const matchedPhones = new Set();
+        let matchCount = 0;
+        normalizedPhonesMap.forEach((originalPhone, normalizedPhone) => {
+            if (normalizedDbPhones.has(normalizedPhone)) {
+                matchedPhones.add(originalPhone);
+                matchCount++;
+                // Only log first 10 matches to avoid console spam
+                if (matchCount <= 10) {
+                    console.log(`✅ Match found: ${originalPhone} -> ${normalizedPhone}`);
+                }
+            }
+        });
+        
+        if (matchCount > 10) {
+            console.log(`✅ ... and ${matchCount - 10} more matches`);
+        }
+        
+        console.log(`✅ Total matches: ${matchedPhones.size} out of ${normalizedPhones.length} phone numbers checked`);
+        
+        return matchedPhones;
+    } catch (error) {
+        console.error('❌ Error checking phone numbers in customer_profile:', error);
+        console.error('Error details:', error.message);
+        return new Set(); // Return empty set on error
+    }
+}
+
 // Function to check for duplicates
 async function checkForDuplicates(leadData) {
     try {
@@ -440,6 +595,8 @@ router.get('/', async (req, res) => {
             .sort({ createdAt: -1 })
             .limit(limit * 1)
             .skip((page - 1) * limit);
+
+            console.log(leads);
 
         const total = await InstantFormLead.countDocuments(query);
 
@@ -528,6 +685,58 @@ router.get('/fields', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Error fetching field names',
+            error: error.message
+        });
+    }
+});
+
+// GET /api/instant-leads/test-match/:phone - Test phone number matching
+router.get('/test-match/:phone', async (req, res) => {
+    try {
+        const phone = req.params.phone;
+        const normalized = normalizePhoneNumber(phone);
+        
+        // Get all customer phones and check
+        const query = `
+            SELECT DISTINCT cp_mobile
+            FROM customer_profile
+            WHERE cp_mobile IS NOT NULL 
+              AND cp_mobile != ''
+              AND LENGTH(cp_mobile) >= 10
+            LIMIT 1000
+        `;
+        
+        const customerPhones = await executeQuery(query, []);
+        const normalizedDbPhones = new Set();
+        
+        customerPhones.forEach(row => {
+            const normalizedDb = normalizePhoneNumber(row.cp_mobile);
+            if (normalizedDb) {
+                normalizedDbPhones.add(normalizedDb);
+            }
+        });
+        
+        const isMatched = normalized && normalizedDbPhones.has(normalized);
+        
+        res.json({
+            success: true,
+            data: {
+                inputPhone: phone,
+                normalizedPhone: normalized,
+                isMatched: isMatched,
+                totalCustomerPhonesChecked: customerPhones.length,
+                normalizedCustomerPhones: normalizedDbPhones.size,
+                sampleCustomerPhones: Array.from(customerPhones.slice(0, 10).map(r => ({
+                    original: r.cp_mobile,
+                    normalized: normalizePhoneNumber(r.cp_mobile)
+                })))
+            }
+        });
+    } catch (error) {
+        console.error('Test match error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error testing phone match',
             error: error.message
         });
     }
