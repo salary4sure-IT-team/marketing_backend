@@ -1,7 +1,7 @@
 import express from "express";
 import { executeQuery } from "../config/mysqlDb.js";
 import InstantFormLead from "../models/InstantFormLead.js";
-// import ExcelUploadHistory from "../models/ExcelUploadHistory.js";
+import ExcelUploadHistory from "../models/ExcelUploadHistory.js";
 
 const router = express.Router();
 
@@ -287,16 +287,27 @@ router.get("/leads", async (req, res) => {
         });
 
         
+        // Aggregate to calculate total budget sum
+        const budgetAggregation = await ExcelUploadHistory.aggregate([
+            {
+                $match: {
+                    createdAt: {
+                        $gte: startDateObj,
+                        $lte: endDateObj
+                    },
+                    budget: { $exists: true, $ne: null, $ne: '' }
+                }
+            },
+            {
+                $group: {
+                    _id: null,
+                    totalBudget: { $sum: "$budget" }
+                }
+            }
+        ]);
 
-        // const mkins = await ExcelUploadHistory.find({
-        //     created_at: {
-        //         $gte: startDateObj,
-        //         $lte: endDateObj
-        //     },
-        //     budget: { $exists: true, $ne: null, $ne: '' },
-        //     sumofBudget: { $sum: "$budget" }
-        // });
-        // console.log(mkins);
+        const totalMarketingBudget = budgetAggregation.length > 0 ? budgetAggregation[0].totalBudget : 0;
+        console.log('Total Marketing Budget:', totalMarketingBudget);
 
         res.json({
             success: true,
@@ -313,7 +324,7 @@ router.get("/leads", async (req, res) => {
                 // newlyMatched: newlyMatchedCount,
                 total: finalMatchedLeads + finalUnmatchedLeads
             },
-            // marketingCostInsights : mkins
+            marketingCostInsights : totalMarketingBudget
         });
 
     } catch (error) {

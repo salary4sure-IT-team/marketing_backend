@@ -329,16 +329,37 @@ router.get("/stats", async (req, res) => {
  */
 router.get("/by-state", async (req, res) => {
     try {
+
+        const { startDate, endDate } = req.query;
+
+        // Validate required parameters
+        if (!startDate || !endDate) {
+            return res.status(400).json({
+                success: false,
+                message: "Start date and end date are required"
+            });
+        }
+
+        // Validate date format (YYYY-MM-DD)
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+            return res.status(400).json({
+                success: false,
+                message: "Date format must be YYYY-MM-DD"
+            });
+        }
+
         // Simple query to get all customers with state information
         const query = `SELECT 
                         ms.m_state_name as state_name
                      FROM customer_profile cp 
                      LEFT JOIN master_city mc ON cp.cp_residence_city_id = mc.m_city_id
                      LEFT JOIN master_state ms ON mc.m_city_state_id = ms.m_state_id
-                     WHERE cp.cp_residence_city_id IS NOT NULL`;
+                     WHERE cp.cp_residence_city_id IS NOT NULL
+                     AND DATE(cp.cp_created_at) BETWEEN ? AND ?`;
         
         // Execute query
-        const customers = await executeQuery(query);
+        const customers = await executeQuery(query, [startDate, endDate]);
         
         // Group customers by state and count them
         const stateCounts = {};
@@ -354,7 +375,11 @@ router.get("/by-state", async (req, res) => {
         
         res.json({
             success: true,
-            data: stateCounts
+            data: stateCounts,
+            dateRange: {
+                startDate,
+                endDate
+            },
         });
         
     } catch (error) {
