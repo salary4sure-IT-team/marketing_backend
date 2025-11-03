@@ -1,7 +1,7 @@
 import express from "express";
 import { executeQuery } from "../config/mysqlDb.js";
 import InstantFormLead from "../models/InstantFormLead.js";
-import ExcelUploadHistory from "../models/ExcelUploadHistory.js";
+// import ExcelUploadHistory from "../models/ExcelUploadHistory.js";
 
 const router = express.Router();
 
@@ -288,15 +288,15 @@ router.get("/leads", async (req, res) => {
 
         
 
-        const mkins = await ExcelUploadHistory.find({
-            created_at: {
-                $gte: startDateObj,
-                $lte: endDateObj
-            },
-            budget: { $exists: true, $ne: null, $ne: '' },
-            sumofBudget: { $sum: "$budget" }
-        });
-        console.log(mkins);
+        // const mkins = await ExcelUploadHistory.find({
+        //     created_at: {
+        //         $gte: startDateObj,
+        //         $lte: endDateObj
+        //     },
+        //     budget: { $exists: true, $ne: null, $ne: '' },
+        //     sumofBudget: { $sum: "$budget" }
+        // });
+        // console.log(mkins);
 
         res.json({
             success: true,
@@ -313,7 +313,7 @@ router.get("/leads", async (req, res) => {
                 // newlyMatched: newlyMatchedCount,
                 total: finalMatchedLeads + finalUnmatchedLeads
             },
-            marketingCostInsights : mkins
+            // marketingCostInsights : mkins
         });
 
     } catch (error) {
