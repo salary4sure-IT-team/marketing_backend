@@ -1,5 +1,8 @@
 import express from "express";
 import { executeQuery } from "../config/mysqlDb.js";
+import { v4 as uuidv4 } from 'uuid';
+import SmsLog from "../models/SmsLog.js";
+import { sendSMSViaAiSensy } from "../services/smsService.js";
 
 const router = express.Router();
 
@@ -329,37 +332,16 @@ router.get("/stats", async (req, res) => {
  */
 router.get("/by-state", async (req, res) => {
     try {
-
-        const { startDate, endDate } = req.query;
-
-        // Validate required parameters
-        if (!startDate || !endDate) {
-            return res.status(400).json({
-                success: false,
-                message: "Start date and end date are required"
-            });
-        }
-
-        // Validate date format (YYYY-MM-DD)
-        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
-        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
-            return res.status(400).json({
-                success: false,
-                message: "Date format must be YYYY-MM-DD"
-            });
-        }
-
         // Simple query to get all customers with state information
         const query = `SELECT 
                         ms.m_state_name as state_name
                      FROM customer_profile cp 
                      LEFT JOIN master_city mc ON cp.cp_residence_city_id = mc.m_city_id
                      LEFT JOIN master_state ms ON mc.m_city_state_id = ms.m_state_id
-                     WHERE cp.cp_residence_city_id IS NOT NULL
-                     AND DATE(cp.cp_created_at) BETWEEN ? AND ?`;
+                     WHERE cp.cp_residence_city_id IS NOT NULL`;
         
         // Execute query
-        const customers = await executeQuery(query, [startDate, endDate]);
+        const customers = await executeQuery(query);
         
         // Group customers by state and count them
         const stateCounts = {};
@@ -375,11 +357,7 @@ router.get("/by-state", async (req, res) => {
         
         res.json({
             success: true,
-            data: stateCounts,
-            dateRange: {
-                startDate,
-                endDate
-            },
+            data: stateCounts
         });
         
     } catch (error) {
@@ -395,7 +373,7 @@ router.get("/by-state", async (req, res) => {
 
 /**
  * @swagger
- * /api/customers/by-journey-stage:
+ *   :
  *   get:
  *     summary: Get customer count grouped by journey stage
  *     tags: [Customers]
@@ -517,6 +495,534 @@ router.get("/by-journey-stage", async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Failed to fetch customers by journey stage",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /api/customers/by-journey-stage/{stageId}:
+ *   get:
+ *     summary: Get all customers in a specific journey stage with SMS status
+ *     tags: [Customers]
+ *     parameters:
+ *       - in: path
+ *         name: stageId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Journey stage ID
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 100
+ *         description: Records per page
+ *     responses:
+ *       200:
+ *         description: Customers retrieved successfully with SMS status
+ */
+router.get("/by-journey-stage/:stageId", async (req, res) => {
+    try {
+        const { stageId } = req.params;
+        const { page = 1, limit = 100 } = req.query;
+
+        // Validate stage ID
+        if (!stageId || isNaN(stageId)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid journey stage ID"
+            });
+        }
+
+        const pageNum = parseInt(page) || 1;
+        const limitNum = parseInt(limit) || 100;
+        const offset = (pageNum - 1) * limitNum;
+
+        // Fetch customers from MySQL by journey stage
+        const query = `
+            SELECT 
+                cp.cp_id,
+                cp.cp_first_name,
+                cp.cp_sur_name,
+                cp.cp_mobile,
+                cp.cp_personal_email,
+                cp.cp_journey_stage,
+                cp.cp_created_at,
+                mjs.m_journey_stage as journey_stage_name
+            FROM customer_profile cp
+            LEFT JOIN master_journey_stage mjs ON cp.cp_journey_stage = mjs.m_journey_id
+            WHERE cp.cp_journey_stage = ?
+              AND cp.cp_mobile IS NOT NULL
+              AND cp.cp_mobile != ''
+              AND LENGTH(cp.cp_mobile) >= 10
+            ORDER BY cp.cp_id DESC
+            LIMIT ? OFFSET ?
+        `;
+
+        const countQuery = `
+            SELECT COUNT(*) as total
+            FROM customer_profile cp
+            WHERE cp.cp_journey_stage = ?
+              AND cp.cp_mobile IS NOT NULL
+              AND cp.cp_mobile != ''
+              AND LENGTH(cp.cp_mobile) >= 10
+        `;
+
+        const [customers, countResult] = await Promise.all([
+            executeQuery(query, [stageId, limitNum, offset]),
+            executeQuery(countQuery, [stageId])
+        ]);
+
+        const total = countResult[0]?.total || 0;
+
+        // Get customer IDs for SMS status lookup
+        const customerIds = customers.map(c => c.cp_id);
+
+        // Fetch SMS logs for these customers from MongoDB
+        let smsLogs = [];
+        if (customerIds.length > 0) {
+            smsLogs = await SmsLog.find({
+                customer_id: { $in: customerIds },
+                status: 'sent'
+            }).sort({ created_at: -1 });
+        }
+
+        // Create a map of customer_id to latest SMS log
+        const smsStatusMap = new Map();
+        smsLogs.forEach(log => {
+            if (!smsStatusMap.has(log.customer_id)) {
+                smsStatusMap.set(log.customer_id, {
+                    sms_sent: true,
+                    sms_sent_at: log.sent_at || log.created_at,
+                    last_sms_status: log.status,
+                    last_sms_campaign: log.campaign_name
+                });
+            }
+        });
+
+        // Add SMS status to customers
+        const customersWithSmsStatus = customers.map(customer => {
+            const smsStatus = smsStatusMap.get(customer.cp_id) || {
+                sms_sent: false,
+                sms_sent_at: null,
+                last_sms_status: null,
+                last_sms_campaign: null
+            };
+
+            return {
+                ...customer,
+                sms_status: smsStatus
+            };
+        });
+
+        res.json({
+            success: true,
+            data: customersWithSmsStatus,
+            pagination: {
+                page: pageNum,
+                limit: limitNum,
+                total: total,
+                pages: Math.ceil(total / limitNum)
+            },
+            journey_stage: {
+                stage_id: parseInt(stageId),
+                stage_name: customers[0]?.journey_stage_name || 'Unknown Stage'
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching customers by journey stage:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch customers by journey stage",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /api/customers/send-bulk-sms:
+ *   post:
+ *     summary: Send bulk SMS to customers in a specific journey stage
+ *     tags: [Customers]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - journeyStage
+ *               - campaignName
+ *               - message
+ *             properties:
+ *               journeyStage:
+ *                 type: integer
+ *                 description: Journey stage ID
+ *               campaignName:
+ *                 type: string
+ *                 example: "Missing Document"
+ *               message:
+ *                 type: string
+ *                 description: SMS message content
+ *               templateParams:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Template parameters for dynamic content
+ *     responses:
+ *       200:
+ *         description: Bulk SMS job started successfully
+ */
+router.post("/send-bulk-sms", async (req, res) => {
+    try {
+        const { journeyStage, campaignName, message, templateParams } = req.body;
+
+        // Validation
+        if (!journeyStage || !campaignName || !message) {
+            return res.status(400).json({
+                success: false,
+                message: "Journey stage, campaign name, and message are required"
+            });
+        }
+
+        // Fetch customers from MySQL by journey stage
+        const query = `
+            SELECT 
+                cp.cp_id,
+                cp.cp_mobile,
+                cp.cp_first_name,
+                cp.cp_sur_name,
+                cp.cp_journey_stage,
+                mjs.m_journey_stage as journey_stage_name
+            FROM customer_profile cp
+            LEFT JOIN master_journey_stage mjs ON cp.cp_journey_stage = mjs.m_journey_id
+            WHERE cp.cp_journey_stage = ?
+              AND cp.cp_mobile IS NOT NULL
+              AND cp.cp_mobile != ''
+              AND LENGTH(cp.cp_mobile) >= 10
+        `;
+
+        const customers = await executeQuery(query, [journeyStage]);
+
+        if (customers.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "No customers found for the given journey stage"
+            });
+        }
+
+        // Limit to 1000 customers
+        const limitedCustomers = customers.slice(0, 1000);
+        
+        if (customers.length > 1000) {
+            console.warn(`⚠️ Found ${customers.length} customers, limiting to 1000`);
+        }
+
+        // Generate batch ID
+        const batchId = `batch-${uuidv4()}`;
+
+        // Return immediately and process in background
+        res.json({
+            success: true,
+            message: "Bulk SMS job started",
+            batchId: batchId,
+            totalCustomers: limitedCustomers.length,
+            journeyStage: journeyStage,
+            journeyStageName: limitedCustomers[0]?.journey_stage_name || 'Unknown Stage',
+            status: "processing"
+        });
+
+        // Process SMS in background (don't await - process asynchronously)
+        processSMSBatch(limitedCustomers, batchId, campaignName, message, templateParams)
+            .catch(error => {
+                console.error('❌ Error processing SMS batch:', error);
+            });
+
+    } catch (error) {
+        console.error("Error creating bulk SMS job:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to create bulk SMS job",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * Process SMS batch asynchronously
+ */
+async function processSMSBatch(customers, batchId, campaignName, message, templateParams) {
+    const results = {
+        sent: 0,
+        failed: 0,
+        total: customers.length
+    };
+
+    // Process with a small delay between SMS to avoid rate limiting (10 SMS per second)
+    const DELAY_BETWEEN_SMS = 100; // 100ms = 10 SMS/second
+
+    for (let i = 0; i < customers.length; i++) {
+        const customer = customers[i];
+        
+        try {
+            // Prepare customer name
+            const customerName = [
+                customer.cp_first_name || '',
+                customer.cp_sur_name || ''
+            ].filter(Boolean).join(' ') || 'Customer';
+
+            // Prepare template params
+            let processedTemplateParams = templateParams || [];
+            if (processedTemplateParams.length > 0) {
+                processedTemplateParams = processedTemplateParams.map(param => {
+                    return param
+                        .replace('{FirstName}', customer.cp_first_name || 'Customer')
+                        .replace('{LastName}', customer.cp_sur_name || '')
+                        .replace('{FullName}', customerName)
+                        .replace('{StageName}', customer.journey_stage_name || '');
+                });
+            }
+
+            // Create log entry first
+            const smsLog = await SmsLog.create({
+                customer_id: customer.cp_id,
+                phone_number: customer.cp_mobile,
+                customer_name: customerName,
+                message: message,
+                campaign_name: campaignName,
+                template_params: processedTemplateParams,
+                journey_stage: customer.cp_journey_stage,
+                journey_stage_name: customer.journey_stage_name,
+                batch_id: batchId,
+                status: 'pending'
+            });
+
+            // Send SMS
+            const result = await sendSMSViaAiSensy({
+                destination: customer.cp_mobile,
+                campaignName: campaignName,
+                templateParams: processedTemplateParams,
+                customerName: customerName
+            });
+
+            // Update log based on result
+            if (result.success) {
+                await SmsLog.updateOne(
+                    { _id: smsLog._id },
+                    {
+                        status: 'sent',
+                        sent_at: new Date(),
+                        aisensy_message_id: result.messageId,
+                        aisensy_response: result.response
+                    }
+                );
+                results.sent++;
+            } else {
+                await SmsLog.updateOne(
+                    { _id: smsLog._id },
+                    {
+                        status: 'failed',
+                        failed_at: new Date(),
+                        error_message: result.error,
+                        error_code: result.statusCode?.toString(),
+                        aisensy_response: result.response
+                    }
+                );
+                results.failed++;
+            }
+
+            // Log progress every 100 customers
+            if ((i + 1) % 100 === 0) {
+                console.log(`📊 Progress: ${i + 1}/${customers.length} SMS processed`);
+            }
+
+        } catch (error) {
+            console.error(`❌ Error sending SMS to customer ${customer.cp_id}:`, error.message);
+            
+            // Create failed log entry
+            try {
+                await SmsLog.create({
+                    customer_id: customer.cp_id,
+                    phone_number: customer.cp_mobile,
+                    customer_name: customer.cp_first_name || 'Customer',
+                    message: message,
+                    campaign_name: campaignName,
+                    template_params: templateParams || [],
+                    journey_stage: customer.cp_journey_stage,
+                    journey_stage_name: customer.journey_stage_name,
+                    batch_id: batchId,
+                    status: 'failed',
+                    failed_at: new Date(),
+                    error_message: error.message
+                });
+            } catch (logError) {
+                console.error('❌ Error creating SMS log:', logError);
+            }
+            
+            results.failed++;
+        }
+
+        // Add delay between SMS to avoid rate limiting
+        if (i < customers.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, DELAY_BETWEEN_SMS));
+        }
+    }
+
+    console.log(`✅ Batch ${batchId} completed: ${results.sent} sent, ${results.failed} failed`);
+    return results;
+}
+
+/**
+ * @swagger
+ * /api/customers/sms-status/{batchId}:
+ *   get:
+ *     summary: Get SMS sending status for a batch
+ *     tags: [Customers]
+ */
+router.get("/sms-status/:batchId", async (req, res) => {
+    try {
+        const { batchId } = req.params;
+
+        // Get status from MongoDB
+        const stats = await SmsLog.aggregate([
+            { $match: { batch_id: batchId } },
+            {
+                $group: {
+                    _id: '$status',
+                    count: { $sum: 1 }
+                }
+            }
+        ]);
+
+        const statusCounts = {
+            pending: 0,
+            sent: 0,
+            failed: 0
+        };
+
+        stats.forEach(stat => {
+            statusCounts[stat._id] = stat.count;
+        });
+
+        const total = Object.values(statusCounts).reduce((a, b) => a + b, 0);
+        const successRate = total > 0 ? ((statusCounts.sent / total) * 100).toFixed(2) : 0;
+
+        // Get journey stage breakdown
+        const journeyStageStats = await SmsLog.aggregate([
+            { $match: { batch_id: batchId } },
+            {
+                $group: {
+                    _id: {
+                        stage: '$journey_stage',
+                        stageName: '$journey_stage_name'
+                    },
+                    total: { $sum: 1 },
+                    sent: {
+                        $sum: { $cond: [{ $eq: ['$status', 'sent'] }, 1, 0] }
+                    },
+                    failed: {
+                        $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] }
+                    }
+                }
+            },
+            { $sort: { '_id.stage': 1 } }
+        ]);
+
+        res.json({
+            success: true,
+            batchId: batchId,
+            total: total,
+            status: statusCounts,
+            successRate: `${successRate}%`,
+            journeyStageBreakdown: journeyStageStats.map(stat => ({
+                stage: stat._id.stage,
+                stageName: stat._id.stageName,
+                total: stat.total,
+                sent: stat.sent,
+                failed: stat.failed
+            }))
+        });
+
+    } catch (error) {
+        console.error("Error fetching SMS status:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch SMS status",
+            error: error.message
+        });
+    }
+});
+
+/**
+ * @swagger
+ * /api/customers/sms-logs:
+ *   get:
+ *     summary: Get SMS logs with filters
+ *     tags: [Customers]
+ */
+router.get("/sms-logs", async (req, res) => {
+    try {
+        const { 
+            batchId, 
+            status, 
+            customerId,
+            journeyStage,
+            phoneNumber,
+            startDate,
+            endDate,
+            page = 1,
+            limit = 50
+        } = req.query;
+
+        const query = {};
+        
+        if (batchId) query.batch_id = batchId;
+        if (status) query.status = status;
+        if (customerId) query.customer_id = parseInt(customerId);
+        if (journeyStage) query.journey_stage = parseInt(journeyStage);
+        if (phoneNumber) query.phone_number = phoneNumber;
+        
+        if (startDate || endDate) {
+            query.created_at = {};
+            if (startDate) query.created_at.$gte = new Date(startDate);
+            if (endDate) query.created_at.$lte = new Date(endDate);
+        }
+
+        const skip = (parseInt(page) - 1) * parseInt(limit);
+
+        const logs = await SmsLog.find(query)
+            .sort({ created_at: -1 })
+            .skip(skip)
+            .limit(parseInt(limit));
+
+        const total = await SmsLog.countDocuments(query);
+
+        res.json({
+            success: true,
+            data: logs,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: total,
+                pages: Math.ceil(total / parseInt(limit))
+            }
+        });
+
+    } catch (error) {
+        console.error("Error fetching SMS logs:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch SMS logs",
             error: error.message
         });
     }

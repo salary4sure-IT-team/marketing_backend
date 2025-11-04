@@ -170,6 +170,18 @@ router.post('/upload', (req, res, next) => {
 
         console.log('📊 Excel data loaded:', jsonData.length, 'rows');
         console.log('📋 All headers found:', Object.keys(jsonData[0]));
+        
+        // Debug: Check if PAN number header exists
+        const headers = Object.keys(jsonData[0]);
+        const panHeaders = headers.filter(h => 
+            h.toLowerCase().includes('pan') || 
+            h.toLowerCase().includes('pancard')
+        );
+        if (panHeaders.length > 0) {
+            console.log('✅ PAN number headers found:', panHeaders);
+        } else {
+            console.log('⚠️ No PAN number headers found in Excel. Available headers:', headers);
+        }
 
         // Create upload history record
         const uploadHistory = await ExcelUploadHistory.create({
@@ -190,6 +202,11 @@ router.post('/upload', (req, res, next) => {
         const duplicates = [];
         const errors = [];
         const leadDataArray = []; // Store all lead data first
+        
+        // Track duplicates within the same Excel file
+        const seenPhones = new Map(); // normalized phone -> row number
+        const seenPans = new Map(); // normalized PAN -> row number
+        const seenEmails = new Map(); // normalized email -> row number
 
         // First pass: Extract and validate all leads
         for (let i = 0; i < jsonData.length; i++) {
@@ -199,6 +216,35 @@ router.post('/upload', (req, res, next) => {
             try {
                 // Extract ALL data from Excel row dynamically
                 const leadData = extractAllFields(row, rowNumber);
+                
+                // If PAN number not found in main field, check additional_data
+                if (!leadData.pan_number) {
+                    // Check additional_data for PAN-related keys (including enter_your_pan_no.?)
+                    const panKeys = Object.keys(leadData.additional_data || {}).filter(key => {
+                        const lowerKey = key.toLowerCase();
+                        return lowerKey.includes('pan') || 
+                               lowerKey.includes('enter_your_pan') || 
+                               lowerKey.includes('enter your pan') ||
+                               lowerKey === 'enter_your_pan_no.?';
+                    });
+                    if (panKeys.length > 0) {
+                        const panValue = leadData.additional_data[panKeys[0]];
+                        if (panValue && String(panValue).trim()) {
+                            leadData.pan_number = String(panValue).trim().toUpperCase().replace(/\s+/g, '');
+                            delete leadData.additional_data[panKeys[0]]; // Remove from additional_data
+                            console.log(`✅ Row ${rowNumber}: PAN found in additional_data under key "${panKeys[0]}" -> ${leadData.pan_number}`);
+                        }
+                    }
+                }
+                
+                // Debug: Log PAN number extraction for first few rows
+                if (i < 3) {
+                    const rawPan = row['pan_number'] || row['pan number'] || row['pan_no'] || row['pan'] || row['pancard'] || row['enter_your_pan_no.?'] || row['enter_your_pan_no'] || 'NOT FOUND';
+                    console.log(`🔍 Row ${rowNumber} - PAN extracted:`, leadData.pan_number, '| Raw PAN from Excel:', rawPan);
+                    if (!leadData.pan_number && rawPan !== 'NOT FOUND') {
+                        console.log(`⚠️ Row ${rowNumber}: PAN value exists in Excel (${rawPan}) but not extracted. Available headers:`, Object.keys(row));
+                    }
+                }
 
                 // Basic validation for required fields
                 if (!leadData.phone_number || leadData.phone_number.length < 10) {
@@ -206,24 +252,73 @@ router.post('/upload', (req, res, next) => {
                     continue;
                 }
 
-                // Check for duplicates
-                const duplicateCheck = await checkForDuplicates(leadData);
+                // Normalize phone number for comparison
+                const normalizedPhone = normalizePhoneNumber(leadData.phone_number);
+                
+                // Check for duplicates WITHIN the same Excel file first
+                let isDuplicateInFile = false;
+                let duplicateReason = '';
+                let originalLeadId = null;
 
-                if (duplicateCheck.isDuplicate) {
+                // Check by normalized phone number within file
+                if (normalizedPhone && seenPhones.has(normalizedPhone)) {
+                    isDuplicateInFile = true;
+                    duplicateReason = 'Phone number already exists in this file';
+                    originalLeadId = seenPhones.get(normalizedPhone);
+                } else if (normalizedPhone) {
+                    seenPhones.set(normalizedPhone, rowNumber); // Store row number for reference
+                }
+
+                // Check by PAN number within file
+                if (!isDuplicateInFile && leadData.pan_number && leadData.pan_number.trim()) {
+                    const normalizedPan = leadData.pan_number.trim().toUpperCase();
+                    if (seenPans.has(normalizedPan)) {
+                        isDuplicateInFile = true;
+                        duplicateReason = 'PAN number already exists in this file';
+                        originalLeadId = seenPans.get(normalizedPan);
+                    } else {
+                        seenPans.set(normalizedPan, rowNumber);
+                    }
+                }
+
+                // Check by email within file
+                if (!isDuplicateInFile && leadData.email && leadData.email.trim()) {
+                    const normalizedEmail = leadData.email.trim().toLowerCase();
+                    if (seenEmails.has(normalizedEmail)) {
+                        isDuplicateInFile = true;
+                        duplicateReason = 'Email already exists in this file';
+                        originalLeadId = seenEmails.get(normalizedEmail);
+                    } else {
+                        seenEmails.set(normalizedEmail, rowNumber);
+                    }
+                }
+
+                // Mark as duplicate if found in file
+                if (isDuplicateInFile) {
                     leadData.is_duplicate = true;
-                    leadData.duplicate_reason = duplicateCheck.reason;
-                    leadData.original_lead_id = duplicateCheck.originalLeadId;
+                    leadData.duplicate_reason = duplicateReason;
+                    // originalLeadId is row number for same-file duplicates, store separately
+                    // Don't set original_lead_id yet (it needs to be ObjectId, not row number)
+                    leadData._original_row_number = originalLeadId; // Store row number temporarily
+                    leadData.original_lead_id = null; // Will be updated after saving original lead
                     duplicates.push({
                         row: rowNumber,
                         phone: leadData.phone_number,
                         pan: leadData.pan_number,
-                        reason: duplicateCheck.reason
+                        reason: duplicateReason
                     });
+                } else {
+                    // Initialize duplicate fields
+                    leadData.is_duplicate = false;
+                    leadData.duplicate_reason = null;
+                    leadData.original_lead_id = null;
+                    leadData._original_row_number = null;
                 }
                 
                 leadData.budget = budget ? Number(budget) : null;
                 leadData.uploadHistoryId = uploadHistory._id; // Link to upload history
                 leadData.excel_row_number = rowNumber; // Store row number for reference
+                leadData.normalized_phone = normalizedPhone; // Store normalized for MongoDB comparison
                 leadDataArray.push(leadData);
 
             } catch (error) {
@@ -237,10 +332,135 @@ router.post('/upload', (req, res, next) => {
         const matchedPhones = await checkPhoneNumbersInCustomerProfile(phoneNumbers);
         console.log(`✅ Found ${matchedPhones.size} matching phone numbers in customer_profile`);
 
-        // Second pass: Save leads with matching information
+        // Batch fetch existing leads from MongoDB to check for duplicates
+        // Get all normalized phone numbers, PANs, and emails from current batch
+        const normalizedPhonesToCheck = leadDataArray
+            .map(lead => lead.normalized_phone)
+            .filter(phone => phone);
+
+        const pansToCheck = leadDataArray
+            .map(lead => lead.pan_number)
+            .filter(pan => pan && pan.trim())
+            .map(pan => pan.trim().toUpperCase());
+
+        const emailsToCheck = leadDataArray
+            .map(lead => lead.email)
+            .filter(email => email && email.trim())
+            .map(email => email.trim().toLowerCase());
+
+        // Fetch existing leads from MongoDB
+        const existingLeads = await InstantFormLead.find({
+            $or: [
+                // We'll check phone numbers in memory after normalizing
+                ...(pansToCheck.length > 0 ? [{ pan_number: { $in: pansToCheck } }] : []),
+                ...(emailsToCheck.length > 0 ? [{ email: { $in: emailsToCheck } }] : [])
+            ]
+        }).select('phone_number pan_number email _id');
+
+        // Fetch leads that might match phone numbers (optimize by checking last 6 months or limit)
+        // Since we need to normalize, we'll fetch recent leads and normalize in memory
+        // For better performance, you could add an index on phone_number and query more specifically
+        const allLeadsWithPhones = await InstantFormLead.find({
+            phone_number: { $exists: true, $ne: null, $ne: '' }
+        })
+        .select('phone_number _id')
+        .limit(100000); // Limit to prevent memory issues with very large databases
+
+        // Create maps for quick lookup (normalized values)
+        const existingPhonesMap = new Map(); // normalized phone -> _id
+        const existingPansMap = new Map(); // normalized PAN -> _id
+        const existingEmailsMap = new Map(); // normalized email -> _id
+
+        // Normalize all existing phone numbers and add to map
+        allLeadsWithPhones.forEach(lead => {
+            if (lead.phone_number) {
+                const normalized = normalizePhoneNumber(lead.phone_number);
+                if (normalized && !existingPhonesMap.has(normalized)) {
+                    existingPhonesMap.set(normalized, lead._id);
+                }
+            }
+        });
+
+        // Add PANs and emails to maps
+        existingLeads.forEach(lead => {
+            if (lead.pan_number) {
+                const normalizedPan = lead.pan_number.trim().toUpperCase();
+                if (!existingPansMap.has(normalizedPan)) {
+                    existingPansMap.set(normalizedPan, lead._id);
+                }
+            }
+            if (lead.email) {
+                const normalizedEmail = lead.email.trim().toLowerCase();
+                if (!existingEmailsMap.has(normalizedEmail)) {
+                    existingEmailsMap.set(normalizedEmail, lead._id);
+                }
+            }
+        });
+
+        console.log(`🔍 Checking duplicates against MongoDB: ${existingPhonesMap.size} phones, ${existingPansMap.size} PANs, ${existingEmailsMap.size} emails`);
+
+        // Second pass: Check against MongoDB and save leads
         let matchedCount = 0;
-        for (const leadData of leadDataArray) {
+        let duplicateCountFromDb = 0;
+        
+        // Track saved lead IDs by row number (for updating same-file duplicate references)
+        const savedLeadIdsByRow = new Map();
+
+        for (let i = 0; i < leadDataArray.length; i++) {
+            const leadData = leadDataArray[i];
+            
             try {
+                // Check for duplicates in MongoDB (if not already marked as duplicate in file)
+                if (!leadData.is_duplicate) {
+                    const normalizedPhone = leadData.normalized_phone;
+                    
+                    // Check by normalized phone number
+                    if (normalizedPhone && existingPhonesMap.has(normalizedPhone)) {
+                        leadData.is_duplicate = true;
+                        leadData.duplicate_reason = 'Phone number already exists in database';
+                        leadData.original_lead_id = existingPhonesMap.get(normalizedPhone);
+                        duplicateCountFromDb++;
+                        duplicates.push({
+                            row: leadData.excel_row_number,
+                            phone: leadData.phone_number,
+                            pan: leadData.pan_number,
+                            reason: leadData.duplicate_reason
+                        });
+                    }
+                    // Check by PAN number
+                    else if (leadData.pan_number && leadData.pan_number.trim()) {
+                        const normalizedPan = leadData.pan_number.trim().toUpperCase();
+                        if (existingPansMap.has(normalizedPan)) {
+                            leadData.is_duplicate = true;
+                            leadData.duplicate_reason = 'PAN number already exists in database';
+                            leadData.original_lead_id = existingPansMap.get(normalizedPan);
+                            duplicateCountFromDb++;
+                            duplicates.push({
+                                row: leadData.excel_row_number,
+                                phone: leadData.phone_number,
+                                pan: leadData.pan_number,
+                                reason: leadData.duplicate_reason
+                            });
+                        }
+                    }
+                    // Check by email
+                    else if (leadData.email && leadData.email.trim()) {
+                        const normalizedEmail = leadData.email.trim().toLowerCase();
+                        if (existingEmailsMap.has(normalizedEmail)) {
+                            leadData.is_duplicate = true;
+                            leadData.duplicate_reason = 'Email already exists in database';
+                            leadData.original_lead_id = existingEmailsMap.get(normalizedEmail);
+                            duplicateCountFromDb++;
+                            duplicates.push({
+                                row: leadData.excel_row_number,
+                                phone: leadData.phone_number,
+                                pan: leadData.pan_number,
+                                reason: leadData.duplicate_reason
+                            });
+                        }
+                    }
+                }
+
                 // Normalize phone number and check if it matches customer_profile
                 const normalizedPhone = normalizePhoneNumber(leadData.phone_number);
                 const isMatched = normalizedPhone && matchedPhones.has(leadData.phone_number);
@@ -258,9 +478,32 @@ router.post('/upload', (req, res, next) => {
                     leadData.matched_at = null;
                 }
 
-                // Store in MongoDB
+                // Remove normalized_phone from leadData before saving (it's just for comparison)
+                delete leadData.normalized_phone;
+
+                // Remove temporary _original_row_number before saving (it's not part of schema)
+                const originalRowNumber = leadData._original_row_number;
+                delete leadData._original_row_number;
+                
+                // Store in MongoDB (save even if duplicate, so you can track them)
                 const savedLead = await InstantFormLead.create(leadData);
                 processedLeads.push(savedLead);
+                
+                // Track saved lead ID by row number
+                savedLeadIdsByRow.set(leadData.excel_row_number, savedLead._id);
+                
+                // If this was marked as duplicate from same file, update original_lead_id with actual MongoDB _id
+                if (leadData.is_duplicate && leadData.duplicate_reason && leadData.duplicate_reason.includes('in this file')) {
+                    // The originalRowNumber was stored in _original_row_number, find the actual MongoDB _id
+                    if (originalRowNumber && savedLeadIdsByRow.has(originalRowNumber)) {
+                        const originalLeadMongoId = savedLeadIdsByRow.get(originalRowNumber);
+                        await InstantFormLead.updateOne(
+                            { _id: savedLead._id },
+                            { original_lead_id: originalLeadMongoId }
+                        );
+                        savedLead.original_lead_id = originalLeadMongoId;
+                    }
+                }
 
                 console.log(`✅ Row ${leadData.excel_row_number}: Processed - Phone: ${leadData.phone_number}, Duplicate: ${leadData.is_duplicate}, Matched: ${leadData.matched_in_customer_profile}`);
 
@@ -270,7 +513,7 @@ router.post('/upload', (req, res, next) => {
             }
         }
 
-        console.log(`📊 Upload Summary: ${processedLeads.length} processed, ${matchedCount} matched, ${duplicates.length} duplicates`);
+        console.log(`📊 Upload Summary: ${processedLeads.length} processed, ${matchedCount} matched, ${duplicates.length} duplicates (${duplicateCountFromDb} from DB, ${duplicates.length - duplicateCountFromDb} from file)`);
 
         // Update upload history with final counts
         await ExcelUploadHistory.findByIdAndUpdate(uploadHistory._id, {
@@ -352,7 +595,7 @@ function extractAllFields(row, rowNumber) {
         'platform': ['platform', 'source', 'channel'],
         'what_is_your_monthly_salary': ['what_is_your_monthly_salary?', 'what_is_your_monthly_salary', 'salary', 'monthly_salary', 'income'],
         'phone_number': ['phone_number', 'phone number', 'phone', 'mobile', 'contact_number'],
-        'pan_number': ['pan_number', 'pan number', 'pan_no', 'pan', 'pancard'],
+        'pan_number': ['pan_number', 'pan number', 'pan_no', 'pan', 'pancard', 'pan card', 'pan_card', 'pancard number', 'pancard_no', 'pancard_number', 'pan_no.', 'pan number.', 'pan_no_', 'enter_your_pan_no.?', 'enter_your_pan_no', 'enter your pan no', 'enter your pan number', 'enter_pan_no', 'enter pan no'],
         'email': ['email', 'email_id', 'email address'],
         'full_name': ['full_name', 'full name', 'name', 'customer_name'],
         'first_name': ['first_name', 'first name', 'fname'],
@@ -372,9 +615,13 @@ function extractAllFields(row, rowNumber) {
 
     // Process each Excel column
     Object.keys(row).forEach(excelHeader => {
-        const value = String(row[excelHeader] || '').trim();
+        const rawValue = row[excelHeader];
+        const value = rawValue !== null && rawValue !== undefined ? String(rawValue).trim() : '';
         
-        if (!value) return; // Skip empty values
+        // Allow empty strings for optional fields, but skip completely null/undefined
+        if (rawValue === null || rawValue === undefined) {
+            return; // Skip null/undefined values
+        }
 
         let fieldAssigned = false;
 
@@ -387,9 +634,10 @@ function extractAllFields(row, rowNumber) {
                 if (modelField === 'phone_number') {
                     leadData[modelField] = value.replace(/\D/g, ''); // Remove non-digits
                 } else if (modelField === 'pan_number') {
-                    leadData[modelField] = value.toUpperCase();
+                    // For PAN, allow empty string but convert to null if empty
+                    leadData[modelField] = value ? value.toUpperCase().replace(/\s+/g, '') : null;
                 } else {
-                    leadData[modelField] = value;
+                    leadData[modelField] = value || null;
                 }
                 fieldAssigned = true;
             }
