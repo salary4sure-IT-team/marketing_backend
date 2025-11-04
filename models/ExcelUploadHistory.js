@@ -32,6 +32,14 @@ const excelUploadHistorySchema = new mongoose.Schema({
     errors: {
         type: Number,
         default: 0
+    },
+    matchedInCustomerProfile: {
+        type: Number,
+        default: 0
+    },
+    unmatchedInCustomerProfile: {
+        type: Number,
+        default: 0
     }
 }, {
     timestamps: true

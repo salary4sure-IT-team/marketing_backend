@@ -195,7 +195,7 @@ router.post('/upload', (req, res, next) => {
             errors: 0
         });
 
-        console.log('📝 Created upload history record:', uploadHistory._id);
+        // console.log('📝 Created upload history record:', uploadHistory._id);
 
         // Process each row
         const processedLeads = [];
@@ -536,6 +536,12 @@ router.post('/upload', (req, res, next) => {
         } catch (cleanupError) {
             console.error('⚠️ File cleanup error:', cleanupError.message);
         }
+
+    const updatedUploadHistory = await ExcelUploadHistory.findByIdAndUpdate(uploadHistory._id, {
+            matchedInCustomerProfile: matchedCount,
+            unmatchedInCustomerProfile: processedLeads.length - matchedCount
+        });
+        console.log(updatedUploadHistory);
 
         res.json({
             success: true,
