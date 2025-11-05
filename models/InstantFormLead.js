@@ -1,26 +1,26 @@
 import mongoose from 'mongoose';
 
 const instantFormLeadSchema = new mongoose.Schema({
-    // Core Excel headers (required)
+    // Core Excel headers (not required to allow saving rows with errors)
     created_time: {
-        type: String,
-        required: true
+        type: Date,
+        default: null
     },
     ad_id: {
         type: String,
-        required: true
+        default: null
     },
     platform: {
         type: String,
-        required: true
+        default: null
     },
     what_is_your_monthly_salary: {
         type: String,
-        required: true
+        default: null
     },
     phone_number: {
         type: String,
-        required: true
+        default: null
     },
     
     // Common fields that might be in Excel
@@ -149,15 +149,21 @@ const instantFormLeadSchema = new mongoose.Schema({
     matched_at: {
         type: Date,
         default: null
+    },
+    
+    // Error handling
+    error_message: {
+        type: String,
+        default: null
+    },
+    
+    // Budget
+    budget: {
+        type: Number,
+        default: null
     }
 }, {
     timestamps: true
-}, {
-    budget: {
-        type: Number,
-        required: true,
-        default: null
-    }
 });
 
 // Pre-save middleware to set salary_numeric_value
