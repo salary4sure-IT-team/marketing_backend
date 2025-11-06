@@ -137,7 +137,7 @@ router.get("/leads", async (req, res) => {
         const totalMarketingLeadsQuery = `
             SELECT COUNT(*) as total 
             FROM leads 
-            WHERE DATE(created_on) BETWEEN ? AND ? AND utm_campaign = '120237694055210170'
+            WHERE DATE(created_on) BETWEEN ? AND ? AND utm_source = 'MARKETING'
         `;
         
         const [totalMarketingLeadsResult] = await executeQuery(totalMarketingLeadsQuery, [startDate, endDate]);
@@ -150,17 +150,16 @@ router.get("/leads", async (req, res) => {
             SELECT COUNT(*) as quality 
             FROM leads 
             WHERE DATE(created_on) BETWEEN ? AND ?
-            AND utm_campaign = ?
+            AND utm_source = 'MARKETING'
             AND monthly_salary_amount > ?
         `;
         
-        const utmCampaignId = "120237694055210170";
         const minSalary = 35000;
         
         const [qualityLeadsResult] = await executeQuery(qualityLeadsQuery, [
             startDate, 
             endDate, 
-            utmCampaignId, 
+            // utmCampaignId, 
             minSalary
         ]);
         
@@ -176,12 +175,12 @@ router.get("/leads", async (req, res) => {
             SELECT COUNT(*) as conversion 
             FROM leads 
             WHERE DATE(created_on) BETWEEN ? AND ?
-            AND utm_campaign = ?
+            AND utm_source = 'MARKETING'
             AND monthly_salary_amount > ?
             AND status = 'DISBURSED'
         `;
         
-        const [conversionLeadsResult] = await executeQuery(conversionLeadsQuery, [startDate, endDate, utmCampaignId, minSalary]);
+        const [conversionLeadsResult] = await executeQuery(conversionLeadsQuery, [startDate, endDate, minSalary]);
         console.log(conversionLeadsResult);
         const conversionLeads = conversionLeadsResult?.conversion || 0;
 
@@ -191,7 +190,7 @@ router.get("/leads", async (req, res) => {
   FROM leads le
   LEFT JOIN loan l ON le.lead_id = l.lead_id
   WHERE DATE(le.created_on) BETWEEN ? AND ?
-    AND le.utm_campaign = '120237694055210170';
+    AND le.utm_source = 'MARKETING';
 `;
 
         const [sumLoanAmountResult] = await executeQuery(sumLoanAmountQuery, [startDate, endDate]);
@@ -269,7 +268,7 @@ router.get("/leads", async (req, res) => {
 
         // Get final matched and unmatched counts
         const finalMatchedLeads = await InstantFormLead.countDocuments({
-            uploaded_at: {
+            created_time : {
                 $gte: startDateObj,
                 $lte: endDateObj
             },
@@ -278,7 +277,7 @@ router.get("/leads", async (req, res) => {
         });
 
         const finalUnmatchedLeads = await InstantFormLead.countDocuments({
-            uploaded_at: {
+            created_time : {
                 $gte: startDateObj,
                 $lte: endDateObj
             },
@@ -363,10 +362,10 @@ router.get("/leads/stats", async (req, res) => {
             AND monthly_salary_amount > ?
         `;
         
-        const utmCampaignId = "120237694055210170";
+        // const utmCampaignId = "120237694055210170";
         const minSalary = 35000;
         
-        const [qualityLeadsResult] = await executeQuery(qualityLeadsQuery, [utmCampaignId, minSalary]);
+        const [qualityLeadsResult] = await executeQuery(qualityLeadsQuery, [ minSalary]);
         const qualityLeads = qualityLeadsResult?.quality || 0;
 
         // Calculate conversion rate
