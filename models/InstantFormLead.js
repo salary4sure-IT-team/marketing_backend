@@ -184,7 +184,6 @@ instantFormLeadSchema.pre('save', function(next) {
 instantFormLeadSchema.index({ phone_number: 1 });
 instantFormLeadSchema.index({ pan_number: 1 });
 instantFormLeadSchema.index({ email: 1 });
-instantFormLeadSchema.index({ phone_number: 1, pan_number: 1 });
 instantFormLeadSchema.index({ quality_lead: 1 });
 instantFormLeadSchema.index({ is_duplicate: 1 });
 instantFormLeadSchema.index({ created_time: 1 });

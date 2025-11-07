@@ -203,10 +203,8 @@ router.post('/upload', (req, res, next) => {
         const errors = [];
         const leadDataArray = []; // Store all lead data first
         
-        // Track duplicates within the same Excel file
-        const seenPhones = new Map(); // normalized phone -> row number
+        // Track duplicates within the same Excel file (PAN only)
         const seenPans = new Map(); // normalized PAN -> row number
-        const seenEmails = new Map(); // normalized email -> row number
 
         // First pass: Extract and validate all leads
         for (let i = 0; i < jsonData.length; i++) {
@@ -252,25 +250,12 @@ router.post('/upload', (req, res, next) => {
                     continue;
                 }
 
-                // Normalize phone number for comparison
-                const normalizedPhone = normalizePhoneNumber(leadData.phone_number);
-                
-                // Check for duplicates WITHIN the same Excel file first
+                // Check for duplicates WITHIN the same Excel file using PAN only
                 let isDuplicateInFile = false;
                 let duplicateReason = '';
                 let originalLeadId = null;
 
-                // Check by normalized phone number within file
-                if (normalizedPhone && seenPhones.has(normalizedPhone)) {
-                    isDuplicateInFile = true;
-                    duplicateReason = 'Phone number already exists in this file';
-                    originalLeadId = seenPhones.get(normalizedPhone);
-                } else if (normalizedPhone) {
-                    seenPhones.set(normalizedPhone, rowNumber); // Store row number for reference
-                }
-
-                // Check by PAN number within file
-                if (!isDuplicateInFile && leadData.pan_number && leadData.pan_number.trim()) {
+                if (leadData.pan_number && leadData.pan_number.trim()) {
                     const normalizedPan = leadData.pan_number.trim().toUpperCase();
                     if (seenPans.has(normalizedPan)) {
                         isDuplicateInFile = true;
@@ -281,25 +266,11 @@ router.post('/upload', (req, res, next) => {
                     }
                 }
 
-                // Check by email within file
-                if (!isDuplicateInFile && leadData.email && leadData.email.trim()) {
-                    const normalizedEmail = leadData.email.trim().toLowerCase();
-                    if (seenEmails.has(normalizedEmail)) {
-                        isDuplicateInFile = true;
-                        duplicateReason = 'Email already exists in this file';
-                        originalLeadId = seenEmails.get(normalizedEmail);
-                    } else {
-                        seenEmails.set(normalizedEmail, rowNumber);
-                    }
-                }
-
                 // Mark as duplicate if found in file
                 if (isDuplicateInFile) {
                     leadData.is_duplicate = true;
                     leadData.duplicate_reason = duplicateReason;
-                    // originalLeadId is row number for same-file duplicates, store separately
-                    // Don't set original_lead_id yet (it needs to be ObjectId, not row number)
-                    leadData._original_row_number = originalLeadId; // Store row number temporarily
+                    leadData._original_row_number = originalLeadId; // Store original row number temporarily
                     leadData.original_lead_id = null; // Will be updated after saving original lead
                     duplicates.push({
                         row: rowNumber,
@@ -308,7 +279,6 @@ router.post('/upload', (req, res, next) => {
                         reason: duplicateReason
                     });
                 } else {
-                    // Initialize duplicate fields
                     leadData.is_duplicate = false;
                     leadData.duplicate_reason = null;
                     leadData.original_lead_id = null;
@@ -318,7 +288,6 @@ router.post('/upload', (req, res, next) => {
                 leadData.budget = budget ? Number(budget) : null;
                 leadData.uploadHistoryId = uploadHistory._id; // Link to upload history
                 leadData.excel_row_number = rowNumber; // Store row number for reference
-                leadData.normalized_phone = normalizedPhone; // Store normalized for MongoDB comparison
                 leadDataArray.push(leadData);
 
             } catch (error) {
@@ -332,76 +301,8 @@ router.post('/upload', (req, res, next) => {
         const matchedPhones = await checkPhoneNumbersInCustomerProfile(phoneNumbers);
         console.log(`✅ Found ${matchedPhones.size} matching phone numbers in customer_profile`);
 
-        // Batch fetch existing leads from MongoDB to check for duplicates
-        // Get all normalized phone numbers, PANs, and emails from current batch
-        const normalizedPhonesToCheck = leadDataArray
-            .map(lead => lead.normalized_phone)
-            .filter(phone => phone);
-
-        const pansToCheck = leadDataArray
-            .map(lead => lead.pan_number)
-            .filter(pan => pan && pan.trim())
-            .map(pan => pan.trim().toUpperCase());
-
-        const emailsToCheck = leadDataArray
-            .map(lead => lead.email)
-            .filter(email => email && email.trim())
-            .map(email => email.trim().toLowerCase());
-
-        // Fetch existing leads from MongoDB
-        const existingLeads = await InstantFormLead.find({
-            $or: [
-                // We'll check phone numbers in memory after normalizing
-                ...(pansToCheck.length > 0 ? [{ pan_number: { $in: pansToCheck } }] : []),
-                ...(emailsToCheck.length > 0 ? [{ email: { $in: emailsToCheck } }] : [])
-            ]
-        }).select('phone_number pan_number email _id');
-
-        // Fetch leads that might match phone numbers (optimize by checking last 6 months or limit)
-        // Since we need to normalize, we'll fetch recent leads and normalize in memory
-        // For better performance, you could add an index on phone_number and query more specifically
-        const allLeadsWithPhones = await InstantFormLead.find({
-            phone_number: { $exists: true, $ne: null, $ne: '' }
-        })
-        .select('phone_number _id')
-        .limit(100000); // Limit to prevent memory issues with very large databases
-
-        // Create maps for quick lookup (normalized values)
-        const existingPhonesMap = new Map(); // normalized phone -> _id
-        const existingPansMap = new Map(); // normalized PAN -> _id
-        const existingEmailsMap = new Map(); // normalized email -> _id
-
-        // Normalize all existing phone numbers and add to map
-        allLeadsWithPhones.forEach(lead => {
-            if (lead.phone_number) {
-                const normalized = normalizePhoneNumber(lead.phone_number);
-                if (normalized && !existingPhonesMap.has(normalized)) {
-                    existingPhonesMap.set(normalized, lead._id);
-                }
-            }
-        });
-
-        // Add PANs and emails to maps
-        existingLeads.forEach(lead => {
-            if (lead.pan_number) {
-                const normalizedPan = lead.pan_number.trim().toUpperCase();
-                if (!existingPansMap.has(normalizedPan)) {
-                    existingPansMap.set(normalizedPan, lead._id);
-                }
-            }
-            if (lead.email) {
-                const normalizedEmail = lead.email.trim().toLowerCase();
-                if (!existingEmailsMap.has(normalizedEmail)) {
-                    existingEmailsMap.set(normalizedEmail, lead._id);
-                }
-            }
-        });
-
-        console.log(`🔍 Checking duplicates against MongoDB: ${existingPhonesMap.size} phones, ${existingPansMap.size} PANs, ${existingEmailsMap.size} emails`);
-
-        // Second pass: Check against MongoDB and save leads
+        // Second pass: Save leads and handle matches
         let matchedCount = 0;
-        let duplicateCountFromDb = 0;
         
         // Track saved lead IDs by row number (for updating same-file duplicate references)
         const savedLeadIdsByRow = new Map();
@@ -410,57 +311,6 @@ router.post('/upload', (req, res, next) => {
             const leadData = leadDataArray[i];
             
             try {
-                // Check for duplicates in MongoDB (if not already marked as duplicate in file)
-                if (!leadData.is_duplicate) {
-                    const normalizedPhone = leadData.normalized_phone;
-                    
-                    // Check by normalized phone number
-                    if (normalizedPhone && existingPhonesMap.has(normalizedPhone)) {
-                        leadData.is_duplicate = true;
-                        leadData.duplicate_reason = 'Phone number already exists in database';
-                        leadData.original_lead_id = existingPhonesMap.get(normalizedPhone);
-                        duplicateCountFromDb++;
-                        duplicates.push({
-                            row: leadData.excel_row_number,
-                            phone: leadData.phone_number,
-                            pan: leadData.pan_number,
-                            reason: leadData.duplicate_reason
-                        });
-                    }
-                    // Check by PAN number
-                    else if (leadData.pan_number && leadData.pan_number.trim()) {
-                        const normalizedPan = leadData.pan_number.trim().toUpperCase();
-                        if (existingPansMap.has(normalizedPan)) {
-                            leadData.is_duplicate = true;
-                            leadData.duplicate_reason = 'PAN number already exists in database';
-                            leadData.original_lead_id = existingPansMap.get(normalizedPan);
-                            duplicateCountFromDb++;
-                            duplicates.push({
-                                row: leadData.excel_row_number,
-                                phone: leadData.phone_number,
-                                pan: leadData.pan_number,
-                                reason: leadData.duplicate_reason
-                            });
-                        }
-                    }
-                    // Check by email
-                    else if (leadData.email && leadData.email.trim()) {
-                        const normalizedEmail = leadData.email.trim().toLowerCase();
-                        if (existingEmailsMap.has(normalizedEmail)) {
-                            leadData.is_duplicate = true;
-                            leadData.duplicate_reason = 'Email already exists in database';
-                            leadData.original_lead_id = existingEmailsMap.get(normalizedEmail);
-                            duplicateCountFromDb++;
-                            duplicates.push({
-                                row: leadData.excel_row_number,
-                                phone: leadData.phone_number,
-                                pan: leadData.pan_number,
-                                reason: leadData.duplicate_reason
-                            });
-                        }
-                    }
-                }
-
                 // Normalize phone number and check if it matches customer_profile
                 const normalizedPhone = normalizePhoneNumber(leadData.phone_number);
                 const isMatched = normalizedPhone && matchedPhones.has(leadData.phone_number);
@@ -469,7 +319,6 @@ router.post('/upload', (req, res, next) => {
                     leadData.matched_in_customer_profile = true;
                     leadData.matched_at = new Date();
                     matchedCount++;
-                    // Only log first 5 matches per upload to avoid console spam
                     if (matchedCount <= 5) {
                         console.log(`✅ Match: ${leadData.phone_number} (normalized: ${normalizedPhone}) -> Matched in customer_profile`);
                     }
@@ -477,9 +326,6 @@ router.post('/upload', (req, res, next) => {
                     leadData.matched_in_customer_profile = false;
                     leadData.matched_at = null;
                 }
-
-                // Remove normalized_phone from leadData before saving (it's just for comparison)
-                delete leadData.normalized_phone;
 
                 // Remove temporary _original_row_number before saving (it's not part of schema)
                 const originalRowNumber = leadData._original_row_number;
@@ -513,7 +359,7 @@ router.post('/upload', (req, res, next) => {
             }
         }
 
-        console.log(`📊 Upload Summary: ${processedLeads.length} processed, ${matchedCount} matched, ${duplicates.length} duplicates (${duplicateCountFromDb} from DB, ${duplicates.length - duplicateCountFromDb} from file)`);
+        console.log(`📊 Upload Summary: ${processedLeads.length} processed, ${matchedCount} matched, ${duplicates.length} duplicates (from file)`);
 
         // Update upload history with final counts
         await ExcelUploadHistory.findByIdAndUpdate(uploadHistory._id, {
@@ -843,45 +689,15 @@ async function checkPhoneNumbersInCustomerProfile(phoneNumbers) {
 // Function to check for duplicates
 async function checkForDuplicates(leadData) {
     try {
-        // Check by phone number
-        const phoneDuplicate = await InstantFormLead.findOne({
-            phone_number: leadData.phone_number
-        });
-
-        if (phoneDuplicate) {
-            return {
-                isDuplicate: true,
-                reason: 'Phone number already exists',
-                originalLeadId: phoneDuplicate._id
-            };
-        }
-
-        // Check by PAN number (if provided)
         if (leadData.pan_number && leadData.pan_number.length > 0) {
-            const panDuplicate = await InstantFormLead.findOne({
-                pan_number: leadData.pan_number
-            });
+            const normalizedPan = leadData.pan_number.trim().toUpperCase();
+            const panDuplicate = await InstantFormLead.findOne({ pan_number: normalizedPan });
 
             if (panDuplicate) {
                 return {
                     isDuplicate: true,
                     reason: 'PAN number already exists',
                     originalLeadId: panDuplicate._id
-                };
-            }
-        }
-
-        // Check by email (if provided)
-        if (leadData.email && leadData.email.length > 0) {
-            const emailDuplicate = await InstantFormLead.findOne({
-                email: leadData.email
-            });
-
-            if (emailDuplicate) {
-                return {
-                    isDuplicate: true,
-                    reason: 'Email already exists',
-                    originalLeadId: emailDuplicate._id
                 };
             }
         }
