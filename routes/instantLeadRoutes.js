@@ -622,17 +622,17 @@ function convertToDate(dateValue) {
         
         // Auto-detect format: if first number > 12, it must be DD/MM/YY
         // Otherwise, assume MM/DD/YY (American format, matches user's '10/25/25' example)
-        if (first > 12) {
+        // if (first > 12) {
             // DD/MM/YY format
             const day = first;
             const month = second - 1; // JS months are 0-indexed
             return new Date(year, month, day);
-        } else {
-            // MM/DD/YY format (default)
-            const month = first - 1;
-            const day = second;
-            return new Date(year, month, day);
-        }
+        // } else {
+        //     // MM/DD/YY format (default)
+        //     const month = first - 1;
+        //     const day = second;
+        //     return new Date(year, month, day);
+        // }
     }
     
     // Format 3: YYYY-MM-DD or YYYY/MM/DD
