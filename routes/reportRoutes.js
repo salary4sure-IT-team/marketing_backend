@@ -561,5 +561,127 @@ router.get("/leads/fresh-reloan", async (req, res) => {
     }
 });
 
+router.get("/leads/disbursed-instant", async (req, res) => {
+    try {
+        const normalizePan = (pan) => {
+            if (!pan) return null;
+            return String(pan).trim().toUpperCase().replace(/\s+/g, "");
+        };
+
+        // Fetch all unique PAN numbers from InstantFormLead
+        const instantFormLeads = await InstantFormLead.find({
+            pan_number: { $exists: true, $ne: null, $ne: "" }
+        }).select(
+            "pan_number phone_number full_name email created_time platform what_is_your_monthly_salary matched_in_customer_profile quality_lead is_duplicate uploadHistoryId"
+        ).lean();
+
+        if (!instantFormLeads || instantFormLeads.length === 0) {
+            return res.json({
+                success: true,
+                total: 0,
+                disbursed_count: 0,
+                disbursed: [],
+                total_recommended_amount: 0
+            });
+        }
+
+        // Build map PAN -> array of instant form leads
+        const instantLeadsByPan = new Map();
+        instantFormLeads.forEach(lead => {
+            const normalizedPan = normalizePan(lead.pan_number);
+            if (!normalizedPan) return;
+            if (!instantLeadsByPan.has(normalizedPan)) {
+                instantLeadsByPan.set(normalizedPan, []);
+            }
+            instantLeadsByPan.get(normalizedPan).push(lead);
+        });
+
+        const uniquePanNumbers = Array.from(instantLeadsByPan.keys());
+
+        if (uniquePanNumbers.length === 0) {
+            return res.json({
+                success: true,
+                total: instantFormLeads.length,
+                disbursed_count: 0,
+                disbursed: [],
+                total_recommended_amount: 0
+            });
+        }
+
+        // Fetch disbursed leads from MySQL that match these PAN numbers
+        const placeholders = uniquePanNumbers.map(() => '?').join(',');
+        const disbursedLeadsQuery = `
+            SELECT 
+                le.lead_id,
+                le.pancard,
+                le.mobile,
+                le.created_on,
+                le.utm_source,
+                le.utm_campaign,
+                le.monthly_salary_amount,
+                ln.loan_id,
+                COALESCE(ln.recommended_amount, 0) AS recommended_amount
+            FROM leads le
+            LEFT JOIN loan ln ON le.lead_id = ln.lead_id
+            WHERE le.status = 'DISBURSED'
+              AND le.pancard IS NOT NULL
+              AND le.pancard != ''
+              AND UPPER(TRIM(CONVERT(le.pancard USING utf8mb4))) IN (${placeholders})
+        `;
+
+        const disbursedLeads = await executeQuery(disbursedLeadsQuery, uniquePanNumbers);
+
+        if (!disbursedLeads || disbursedLeads.length === 0) {
+            return res.json({
+                success: true,
+                total: instantFormLeads.length,
+                disbursed_count: 0,
+                disbursed: [],
+                total_recommended_amount: 0
+            });
+        }
+
+        let totalRecommendedAmount = 0;
+
+        const disbursed = disbursedLeads.map(lead => {
+            const normalizedPan = normalizePan(lead.pancard);
+            const matchingInstantLeads = normalizedPan ? (instantLeadsByPan.get(normalizedPan) || []) : [];
+
+            const recommendedAmount = Number(lead.recommended_amount) || 0;
+            totalRecommendedAmount += recommendedAmount;
+
+            return {
+                lead_id: lead.lead_id,
+                loan_id: lead.loan_id,
+                pancard: lead.pancard,
+                normalized_pan: normalizedPan,
+                mobile: lead.mobile,
+                created_on: lead.created_on,
+                recommended_amount: recommendedAmount,
+                utm_source: lead.utm_source,
+                utm_campaign: lead.utm_campaign,
+                monthly_salary_amount: lead.monthly_salary_amount,
+                instant_form_leads: matchingInstantLeads
+            };
+        });
+
+        res.json({
+            success: true,
+            total: instantFormLeads.length,
+            disbursed_count: disbursed.length,
+            total_recommended_amount: totalRecommendedAmount,
+            disbursed
+        });
+
+    } catch (error) {
+        console.error("Error fetching disbursed instant matches:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch disbursed instant matches",
+            error: error.message
+        });
+    }
+});
+
 
 export default router;

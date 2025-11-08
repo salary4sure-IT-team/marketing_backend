@@ -1049,46 +1049,18 @@ router.get('/recommended-loans', async (req, res) => {
             });
         }
 
-        // Normalize phone numbers for MySQL query
-        const normalizePhoneNumber = (phone) => {
-            if (!phone) return null;
-            let normalized = String(phone).replace(/\D/g, '');
-            if (normalized.length === 12 && normalized.startsWith('91')) {
-                normalized = normalized.substring(2);
-            }
-            normalized = normalized.replace(/^0+/, '');
-            return normalized.length === 10 ? normalized : null;
+        // Normalize PAN numbers for MySQL query
+        const normalizePan = (pan) => {
+            if (!pan) return null;
+            return String(pan).trim().toUpperCase().replace(/\s+/g, '');
         };
 
-        // Get normalized phone numbers from leads
-        const phoneNumbers = leads
-            .map(lead => normalizePhoneNumber(lead.phone_number))
-            .filter(phone => phone);
+        // Get normalized PAN numbers from leads
+        const panNumbers = leads
+            .map(lead => normalizePan(lead.pan_number))
+            .filter(pan => pan);
 
-        if (phoneNumbers.length === 0) {
-            return res.json({
-                success: true,
-                total: 0,
-                data: [],
-                message: 'No valid phone numbers found'
-            });
-        }
-
-        // Step 1: Get customer profiles by phone numbers
-        const placeholders = phoneNumbers.map(() => '?').join(',');
-        const customerQuery = `
-            SELECT 
-                cp.cp_id,
-                cp.cp_mobile,
-                cp.cp_first_name,
-                cp.cp_sur_name
-            FROM customer_profile cp
-            WHERE cp.cp_mobile IN (${placeholders})
-        `;
-
-        const customers = await executeQuery(customerQuery, phoneNumbers);
-
-        if (customers.length === 0) {
+        if (panNumbers.length === 0) {
             return res.json({
                 success: true,
                 total: leads.length,
@@ -1106,34 +1078,56 @@ router.get('/recommended-loans', async (req, res) => {
                     customer_profile: null,
                     recommended_amount: null,
                     loan_id: null,
-                    total_loans_found: 0
+                    total_loans_found: 0,
+                    matched_lead_ids: []
                 })),
-                message: 'No customer profiles found for these phone numbers'
+                message: 'No valid PAN numbers found'
             });
         }
 
-        // Step 2: Find disbursed leads from leads table (by mobile phone)
-        let disbursedLeadIds = [];
-        
+        const uniquePanNumbers = [...new Set(panNumbers)];
+
+        // Step 1: Find disbursed leads from leads table (by PAN)
+        let disbursedLeads = [];
         try {
-            // Find leads by matching mobile phone numbers, filter for DISBURSED status
+            const placeholders = uniquePanNumbers.map(() => '?').join(',');
             const leadsQuery = `
-                SELECT lead_id, mobile
+                SELECT lead_id, pancard
                 FROM leads
-                WHERE mobile IN (${placeholders})
-                AND status = 'DISBURSED'
+                WHERE status = 'DISBURSED'
+                  AND pancard IS NOT NULL
+                  AND pancard != ''
+                  AND UPPER(TRIM(CONVERT(pancard USING utf8mb4))) IN (${placeholders})
             `;
-            const matchingLeads = await executeQuery(leadsQuery, phoneNumbers);
-            disbursedLeadIds = matchingLeads.map(l => l.lead_id);
+            disbursedLeads = await executeQuery(leadsQuery, uniquePanNumbers);
         } catch (error) {
-            console.log('Error finding disbursed leads by mobile:', error.message);
-            disbursedLeadIds = [];
+            console.error('Error finding disbursed leads by PAN:', error.message);
+            disbursedLeads = [];
         }
 
-        // Step 3: Get loans from disbursed leads using lead_id
+        // Map PAN -> array of disbursed lead records
+        const panToLeadsMap = new Map();
+        const disbursedLeadIds = new Set();
+        disbursedLeads.forEach(leadRow => {
+            const normalizedPan = normalizePan(leadRow.pancard);
+            if (!normalizedPan) return;
+            if (!panToLeadsMap.has(normalizedPan)) {
+                panToLeadsMap.set(normalizedPan, []);
+            }
+            panToLeadsMap.get(normalizedPan).push({
+                lead_id: leadRow.lead_id,
+                pancard: leadRow.pancard
+            });
+            if (leadRow.lead_id) {
+                disbursedLeadIds.add(leadRow.lead_id);
+            }
+        });
+
+        // Step 2: Get loans from disbursed leads using lead_id
         let loanData = [];
-        if (disbursedLeadIds.length > 0) {
-            const leadPlaceholders = disbursedLeadIds.map(() => '?').join(',');
+        if (disbursedLeadIds.size > 0) {
+            const leadIdList = Array.from(disbursedLeadIds);
+            const leadPlaceholders = leadIdList.map(() => '?').join(',');
             try {
                 const loanQuery = `
                     SELECT 
@@ -1142,84 +1136,43 @@ router.get('/recommended-loans', async (req, res) => {
                         ln.lead_id
                     FROM loan ln
                     WHERE ln.lead_id IN (${leadPlaceholders})
-                    AND ln.recommended_amount IS NOT NULL
+                      AND ln.recommended_amount IS NOT NULL
                 `;
-                loanData = await executeQuery(loanQuery, disbursedLeadIds);
+                loanData = await executeQuery(loanQuery, leadIdList);
             } catch (error) {
                 console.error('Error fetching loans:', error.message);
                 loanData = [];
             }
         }
 
-        // Create maps for quick lookup
-        const customerMap = new Map();
-        customers.forEach(customer => {
-            const normalizedPhone = normalizePhoneNumber(customer.cp_mobile);
-            if (normalizedPhone && !customerMap.has(normalizedPhone)) {
-                customerMap.set(normalizedPhone, customer);
-            }
-        });
-
         // Create map: lead_id -> loans
-        const leadLoanMap = new Map();
+        const loanMapByLeadId = new Map();
         loanData.forEach(loan => {
             const leadId = loan.lead_id;
-            if (leadId) {
-                if (!leadLoanMap.has(leadId)) {
-                    leadLoanMap.set(leadId, []);
-                }
-                leadLoanMap.get(leadId).push({
-                    recommended_amount: loan.recommended_amount || null,
-                    loan_id: loan.loan_id || null
-                });
+            if (!leadId) return;
+            if (!loanMapByLeadId.has(leadId)) {
+                loanMapByLeadId.set(leadId, []);
             }
-        });
-
-        // Get disbursed leads with their phone numbers for matching
-        let disbursedLeadsWithPhone = [];
-        if (disbursedLeadIds.length > 0) {
-            try {
-                const leadPlaceholders = disbursedLeadIds.map(() => '?').join(',');
-                const leadsWithPhoneQuery = `
-                    SELECT lead_id, mobile
-                    FROM leads
-                    WHERE lead_id IN (${leadPlaceholders})
-                `;
-                disbursedLeadsWithPhone = await executeQuery(leadsWithPhoneQuery, disbursedLeadIds);
-            } catch (error) {
-                console.error('Error fetching leads with phone:', error.message);
-            }
-        }
-
-        // Create map: phone -> lead_id for disbursed leads
-        const phoneToLeadIdMap = new Map();
-        disbursedLeadsWithPhone.forEach(lead => {
-            if (lead.mobile) {
-                const normalizedPhone = normalizePhoneNumber(lead.mobile);
-                if (normalizedPhone) {
-                    phoneToLeadIdMap.set(normalizedPhone, lead.lead_id);
-                }
-            }
-        });
-
-        // Create map: phone -> loans (via lead_id)
-        const loanMapByPhone = new Map();
-        phoneToLeadIdMap.forEach((leadId, phone) => {
-            const loans = leadLoanMap.get(leadId) || [];
-            if (loans.length > 0) {
-                loanMapByPhone.set(phone, loans);
-            }
+            loanMapByLeadId.get(leadId).push({
+                recommended_amount: loan.recommended_amount || null,
+                loan_id: loan.loan_id || null
+            });
         });
 
         // Combine MongoDB leads with MySQL loan data
         const result = leads.map(lead => {
-            const normalizedPhone = normalizePhoneNumber(lead.phone_number);
-            const customer = normalizedPhone ? customerMap.get(normalizedPhone) : null;
-            const customerLoans = normalizedPhone ? (loanMapByPhone.get(normalizedPhone) || []) : [];
+            const normalizedPan = normalizePan(lead.pan_number);
+            const matchedLeads = normalizedPan ? (panToLeadsMap.get(normalizedPan) || []) : [];
+
+            // Collect all loans linked to the matched leads
+            const loansForPan = matchedLeads.reduce((acc, matchedLead) => {
+                const loans = loanMapByLeadId.get(matchedLead.lead_id) || [];
+                return acc.concat(loans.map(loan => ({ ...loan, lead_id: matchedLead.lead_id })));
+            }, []);
 
             // Get the loan with highest recommended_amount if multiple exist
-            const bestLoan = customerLoans.length > 0
-                ? customerLoans.reduce((best, current) => {
+            const bestLoan = loansForPan.length > 0
+                ? loansForPan.reduce((best, current) => {
                     const currentAmount = current.recommended_amount || 0;
                     const bestAmount = best.recommended_amount || 0;
                     return currentAmount > bestAmount ? current : best;
@@ -1237,14 +1190,11 @@ router.get('/recommended-loans', async (req, res) => {
                 platform: lead.platform,
                 salary_range: lead.what_is_your_monthly_salary,
                 salary_numeric_value: lead.salary_numeric_value,
-                customer_profile: customer ? {
-                    cp_id: customer.cp_id,
-                    cp_first_name: customer.cp_first_name,
-                    cp_sur_name: customer.cp_sur_name
-                } : null,
+                customer_profile: null,
                 recommended_amount: bestLoan ? bestLoan.recommended_amount : null,
                 loan_id: bestLoan ? bestLoan.loan_id : null,
-                total_loans_found: customerLoans.length
+                total_loans_found: loansForPan.length,
+                matched_lead_ids: matchedLeads.map(match => match.lead_id)
             };
         });
 
