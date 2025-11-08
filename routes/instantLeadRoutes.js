@@ -1617,4 +1617,345 @@ router.get('/recommended-loans/all', async (req, res) => {
     }
 });
 
+
+// GET /api/instant-leads/recommended-loans/all 
+router.get('/recommended-loans/all/live-leads', async (req, res) => {
+    try {
+        // Get all InstantFormLead records matching criteria (no date filter)
+        const leads = await InstantFormLead.find({
+            is_duplicate: false,
+            matched_in_customer_profile: true
+        }).select('phone_number full_name email pan_number created_time ad_id platform what_is_your_monthly_salary salary_numeric_value _id');
+
+        if (leads.length === 0) {
+            const marketingLeadsQuery = `SELECT COUNT(*) AS total FROM leads WHERE utm_source = 'MARKETING'`;
+            const [marketingLeadsRow] = await executeQuery(marketingLeadsQuery, []);
+            const marketingLeadCount = marketingLeadsRow?.total || 0;
+
+            const qualityLeadsQuery = `
+                SELECT COUNT(*) AS total
+                FROM leads
+                WHERE utm_source = 'MARKETING'
+                  AND monthly_salary_amount > ?
+                  AND (status IS NULL OR status <> 'REJECTED')
+            `;
+            const [qualityLeadsRow] = await executeQuery(qualityLeadsQuery, [35000]);
+            const qualityLeadCount = qualityLeadsRow?.total || 0;
+
+            const convertedLeadsQuery = `
+                SELECT COUNT(*) AS total
+                FROM leads
+                WHERE utm_source = 'MARKETING'
+                  AND status = 'DISBURSED'
+            `;
+            const [convertedLeadsRow] = await executeQuery(convertedLeadsQuery, []);
+            const convertedLeadCount = convertedLeadsRow?.total || 0;
+
+            const marketingDisburseQuery = `
+                SELECT SUM(ln.recommended_amount) AS total
+                FROM leads le
+                LEFT JOIN loan ln ON le.lead_id = ln.lead_id
+                WHERE le.utm_source = 'MARKETING'
+                  AND ln.recommended_amount IS NOT NULL
+            `;
+            const [marketingDisburseRow] = await executeQuery(marketingDisburseQuery, []);
+            const marketingRecommendedAmount = Number(marketingDisburseRow?.total || 0);
+
+            const budgetAgg = await ExcelUploadHistory.aggregate([
+                { $group: { _id: null, total: { $sum: '$budget' } } }
+            ]);
+            const totalBudget = Number(budgetAgg?.[0]?.total || 0);
+
+            return res.json({
+                success: true,
+                totals: {
+                    totalLeads: marketingLeadCount,
+                    instantFormLeads: 0,
+                    marketingLeads: marketingLeadCount
+                },
+                qualityLeads: qualityLeadCount,
+                convertedLeads: convertedLeadCount,
+                amount_spend_on_marketing: totalBudget,
+                disburseAmount: marketingRecommendedAmount,
+                instantLeadRecommendedAmount: 0,
+                marketingRecommendedAmount,
+                data: []
+            });
+        }
+
+        // Normalize phone numbers for MySQL query
+        const normalizePhoneNumber = (phone) => {
+            if (!phone) return null;
+            let normalized = String(phone).replace(/\D/g, '');
+            if (normalized.length === 12 && normalized.startsWith('91')) {
+                normalized = normalized.substring(2);
+            }
+            normalized = normalized.replace(/^0+/, '');
+            return normalized.length === 10 ? normalized : null;
+        };
+
+        // Get normalized phone numbers from leads
+        const phoneNumbers = leads
+            .map(lead => normalizePhoneNumber(lead.phone_number))
+            .filter(phone => phone);
+
+        if (phoneNumbers.length === 0) {
+            const marketingLeadsQuery = `SELECT COUNT(*) AS total FROM leads WHERE utm_source = 'MARKETING'`;
+            const [marketingLeadsRow] = await executeQuery(marketingLeadsQuery, []);
+            const marketingLeadCount = marketingLeadsRow?.total || 0;
+
+            const qualityLeadsQuery = `
+                SELECT COUNT(*) AS total
+                FROM leads
+                WHERE utm_source = 'MARKETING'
+                  AND monthly_salary_amount > ?
+                  AND (status IS NULL OR status <> 'REJECTED')
+            `;
+            const [qualityLeadsRow] = await executeQuery(qualityLeadsQuery, [35000]);
+            const qualityLeadCount = qualityLeadsRow?.total || 0;
+
+            const convertedLeadsQuery = `
+                SELECT COUNT(*) AS total
+                FROM leads
+                WHERE utm_source = 'MARKETING'
+                  AND status = 'DISBURSED'
+            `;
+            const [convertedLeadsRow] = await executeQuery(convertedLeadsQuery, []);
+            const convertedLeadCount = convertedLeadsRow?.total || 0;
+
+            const marketingDisburseQuery = `
+                SELECT SUM(ln.recommended_amount) AS total
+                FROM leads le
+                LEFT JOIN loan ln ON le.lead_id = ln.lead_id
+                WHERE le.utm_source = 'MARKETING'
+                  AND ln.recommended_amount IS NOT NULL
+            `;
+            const [marketingDisburseRow] = await executeQuery(marketingDisburseQuery, []);
+            const marketingRecommendedAmount = Number(marketingDisburseRow?.total || 0);
+
+            const budgetAgg = await ExcelUploadHistory.aggregate([
+                { $group: { _id: null, total: { $sum: '$budget' } } }
+            ]);
+            const totalBudget = Number(budgetAgg?.[0]?.total || 0);
+
+            return res.json({
+                success: true,
+                totals: {
+                    totalLeads: marketingLeadCount,
+                    instantFormLeads: 0,
+                    marketingLeads: marketingLeadCount
+                },
+                qualityLeads: qualityLeadCount,
+                convertedLeads: convertedLeadCount,
+                amount_spend_on_marketing: totalBudget,
+                disburseAmount: marketingRecommendedAmount,
+                instantLeadRecommendedAmount: 0,
+                marketingRecommendedAmount,
+                data: []
+            });
+        }
+
+        // Step 1: Get customer profiles by phone numbers
+        const placeholders = phoneNumbers.map(() => '?').join(',');
+        const customerQuery = `
+            SELECT 
+                cp.cp_id,
+                cp.cp_mobile,
+                cp.cp_first_name,
+                cp.cp_sur_name
+            FROM customer_profile cp
+            WHERE cp.cp_mobile IN (${placeholders})
+        `;
+
+        const customers = await executeQuery(customerQuery, phoneNumbers);
+
+        // Step 2: Find disbursed leads from leads table (by mobile phone)
+        let disbursedLeadIds = [];
+        let marketingDisbursedLeads = [];
+        
+        try {
+            const leadsQuery = `
+                SELECT lead_id, mobile
+                FROM leads
+                WHERE mobile IN (${placeholders})
+                AND status = 'DISBURSED'
+            `;
+            marketingDisbursedLeads = await executeQuery(leadsQuery, phoneNumbers);
+            disbursedLeadIds = marketingDisbursedLeads.map(l => l.lead_id);
+        } catch (error) {
+            console.log('Error finding disbursed leads by mobile:', error.message);
+            disbursedLeadIds = [];
+            marketingDisbursedLeads = [];
+        }
+
+        // Step 3: Get loans from disbursed leads using lead_id
+        let loanData = [];
+        if (disbursedLeadIds.length > 0) {
+            const leadPlaceholders = disbursedLeadIds.map(() => '?').join(',');
+            try {
+                const loanQuery = `
+                    SELECT 
+                        ln.loan_id,
+                        ln.recommended_amount,
+                        ln.lead_id
+                    FROM loan ln
+                    WHERE ln.lead_id IN (${leadPlaceholders})
+                    AND ln.recommended_amount IS NOT NULL
+                `;
+                loanData = await executeQuery(loanQuery, disbursedLeadIds);
+            } catch (error) {
+                console.error('Error fetching loans:', error.message);
+                loanData = [];
+            }
+        }
+
+        // Create maps for quick lookup
+        const customerMap = new Map();
+        customers.forEach(customer => {
+            const normalizedPhone = normalizePhoneNumber(customer.cp_mobile);
+            if (normalizedPhone && !customerMap.has(normalizedPhone)) {
+                customerMap.set(normalizedPhone, customer);
+            }
+        });
+
+        const leadLoanMap = new Map();
+        loanData.forEach(loan => {
+            const leadId = loan.lead_id;
+            if (leadId) {
+                if (!leadLoanMap.has(leadId)) {
+                    leadLoanMap.set(leadId, []);
+                }
+                leadLoanMap.get(leadId).push({
+                    recommended_amount: loan.recommended_amount || null,
+                    loan_id: loan.loan_id || null
+                });
+            }
+        });
+
+        const phoneToLeadIdMap = new Map();
+        marketingDisbursedLeads.forEach(lead => {
+            if (lead.mobile) {
+                const normalizedPhone = normalizePhoneNumber(lead.mobile);
+                if (normalizedPhone) {
+                    phoneToLeadIdMap.set(normalizedPhone, lead.lead_id);
+                }
+            }
+        });
+
+        const loanMapByPhone = new Map();
+        phoneToLeadIdMap.forEach((leadId, phone) => {
+            const loans = leadLoanMap.get(leadId) || [];
+            if (loans.length > 0) {
+                loanMapByPhone.set(phone, loans);
+            }
+        });
+
+        // Combine MongoDB leads with MySQL loan data
+        const result = leads.map(lead => {
+            const normalizedPhone = normalizePhoneNumber(lead.phone_number);
+            const customer = normalizedPhone ? customerMap.get(normalizedPhone) : null;
+            const customerLoans = normalizedPhone ? (loanMapByPhone.get(normalizedPhone) || []) : [];
+
+            const bestLoan = customerLoans.length > 0
+                ? customerLoans.reduce((best, current) => {
+                    const currentAmount = current.recommended_amount || 0;
+                    const bestAmount = best.recommended_amount || 0;
+                    return currentAmount > bestAmount ? current : best;
+                })
+                : null;
+
+            return {
+                lead_id: lead._id,
+                phone_number: lead.phone_number,
+                full_name: lead.full_name,
+                email: lead.email,
+                pan_number: lead.pan_number,
+                created_time: lead.created_time,
+                ad_id: lead.ad_id,
+                platform: lead.platform,
+                salary_range: lead.what_is_your_monthly_salary,
+                salary_numeric_value: lead.salary_numeric_value,
+                customer_profile: customer ? {
+                    cp_id: customer.cp_id,
+                    cp_first_name: customer.cp_first_name,
+                    cp_sur_name: customer.cp_sur_name
+                } : null,
+                recommended_amount: bestLoan ? bestLoan.recommended_amount : null,
+                loan_id: bestLoan ? bestLoan.loan_id : null,
+                total_loans_found: customerLoans.length
+            };
+        });
+
+        const instantRecommendedAmount = result.reduce((sum, lead) => {
+            return sum + (lead.recommended_amount || 0);
+        }, 0);
+
+        // Marketing metrics
+        const marketingLeadsQuery = `SELECT COUNT(*) AS total FROM leads WHERE utm_source = 'MARKETING'`;
+        const [marketingLeadsRow] = await executeQuery(marketingLeadsQuery, []);
+        const marketingLeadCount = marketingLeadsRow?.total || 0;
+
+        const qualityLeadsQuery = `
+            SELECT COUNT(*) AS total
+            FROM leads
+            WHERE utm_source = 'MARKETING'
+              AND monthly_salary_amount > ?
+              AND (status IS NULL OR status <> 'REJECTED')
+        `;
+        const [qualityLeadsRow] = await executeQuery(qualityLeadsQuery, [35000]);
+        const qualityLeadCount = qualityLeadsRow?.total || 0;
+
+        const convertedLeadsQuery = `
+            SELECT COUNT(*) AS total
+            FROM leads
+            WHERE utm_source = 'MARKETING'
+              AND status = 'DISBURSED'
+        `;
+        const [convertedLeadsRow] = await executeQuery(convertedLeadsQuery, []);
+        const convertedLeadCount = convertedLeadsRow?.total || 0;
+
+        const marketingDisburseQuery = `
+            SELECT SUM(ln.recommended_amount) AS total
+            FROM leads le
+            LEFT JOIN loan ln ON le.lead_id = ln.lead_id
+            WHERE le.utm_source = 'MARKETING'
+              AND ln.recommended_amount IS NOT NULL
+        `;
+        const [marketingDisburseRow] = await executeQuery(marketingDisburseQuery, []);
+        const marketingRecommendedAmount = Number(marketingDisburseRow?.total || 0);
+
+        const budgetAgg = await ExcelUploadHistory.aggregate([
+            { $group: { _id: null, total: { $sum: '$budget' } } }
+        ]);
+        const totalBudget = Number(budgetAgg?.[0]?.total || 0);
+
+        const totalLeads = leads.length + marketingLeadCount;
+        const disburseAmount = instantRecommendedAmount + marketingRecommendedAmount;
+
+        res.json({
+            success: true,
+            totals: {
+                totalLeads,
+                instantFormLeads: leads.length,
+                marketingLeads: marketingLeadCount
+            },
+            qualityLeads: qualityLeadCount,
+            convertedLeads: convertedLeadCount,
+            amount_spend_on_marketing: totalBudget,
+            disburseAmount,
+            instantLeadRecommendedAmount: instantRecommendedAmount,
+            marketingRecommendedAmount,
+            data: result
+        });
+
+    } catch (error) {
+        console.error('Error fetching recommended loans:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Error fetching recommended loans',
+            error: error.message
+        });
+    }
+});
+
 export default router;
