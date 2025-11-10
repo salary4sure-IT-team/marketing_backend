@@ -1157,6 +1157,7 @@ router.post('/notifications/send', async (req, res) => {
         const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/app Thank you for choosing Salary4Sure — Team Salary4Sure`;
 
         const results = [];
+        const requestBatchId = `single-${uuidv4()}`;
 
         for (const customer of customers) {
             const phone = normalizePhone(customer.cp_mobile);
@@ -1176,10 +1177,11 @@ router.post('/notifications/send', async (req, res) => {
                 destination: phone,
                 campaignName: whatsappCampaignName,
                 userName: 'SALARY4SURE',
-                templateParams: [firstName, firstName],
+                templateParams: [firstName, `${customer.cp_id}`],
                 source,
                 paramsFallbackValue: {
-                    FirstName: firstName
+                    FirstName: firstName,
+                    CustomerId: `${customer.cp_id}`
                 }
             };
 
@@ -1191,24 +1193,154 @@ router.post('/notifications/send', async (req, res) => {
                 whatsapp: null
             };
 
+            let smsLog = null;
             try {
-                entry.sms = await sendTransactionalSms({
+                smsLog = await SmsLog.create({
+                    customer_id: customer.cp_id,
+                    phone_number: phone,
+                    customer_name: firstName,
+                    campaign_name: whatsappCampaignName,
+                    message: smsMessage,
+                    template_params: [],
+                    batch_id: requestBatchId,
+                    status: 'pending',
+                    channel: 'sms',
+                    provider: 'SMS24',
+                    source,
+                    request_payload: {
+                        mobile: phone,
+                        message: smsMessage
+                    }
+                });
+
+                const smsResponse = await sendTransactionalSms({
                     mobile: phone,
                     message: smsMessage
                 });
+
+                await SmsLog.updateOne(
+                    { _id: smsLog._id },
+                    {
+                        status: 'sent',
+                        sent_at: new Date(),
+                        response_payload: smsResponse,
+                        message_id: smsResponse?.messageid || smsResponse?.messageId || null,
+                        provider: 'SMS24'
+                    }
+                );
+
+                entry.sms = {
+                    status: 'sent',
+                    response: smsResponse,
+                    logId: smsLog._id
+                };
             } catch (error) {
+                if (smsLog) {
+                    await SmsLog.updateOne(
+                        { _id: smsLog._id },
+                        {
+                            status: 'failed',
+                            failed_at: new Date(),
+                            error_message: error.message,
+                            response_payload: error.original?.response?.data || null
+                        }
+                    );
+                } else {
+                    smsLog = await SmsLog.create({
+                        customer_id: customer.cp_id,
+                        phone_number: phone,
+                        customer_name: firstName,
+                        campaign_name: whatsappCampaignName,
+                        message: smsMessage,
+                        template_params: [],
+                        batch_id: requestBatchId,
+                        status: 'failed',
+                        channel: 'sms',
+                        provider: 'SMS24',
+                        source,
+                        error_message: error.message,
+                        failed_at: new Date()
+                    });
+                }
+
                 entry.sms = {
                     status: 'failed',
-                    error: error.message
+                    error: error.message,
+                    logId: smsLog._id
                 };
             }
 
+            let whatsappLog = null;
             try {
-                entry.whatsapp = await sendWhatsappMessage(whatsappPayload);
+                whatsappLog = await SmsLog.create({
+                    customer_id: customer.cp_id,
+                    phone_number: phone,
+                    customer_name: firstName,
+                    campaign_name: whatsappCampaignName,
+                    message: smsMessage,
+                    template_params: whatsappPayload.templateParams,
+                    batch_id: requestBatchId,
+                    status: 'pending',
+                    channel: 'whatsapp',
+                    provider: 'AiSensy',
+                    source,
+                    request_payload: whatsappPayload
+                });
+
+                const whatsappResponse = await sendWhatsappMessage(whatsappPayload);
+
+                await SmsLog.updateOne(
+                    { _id: whatsappLog._id },
+                    {
+                        status: 'sent',
+                        sent_at: new Date(),
+                        response_payload: whatsappResponse,
+                        message_id: whatsappResponse?.messageId || whatsappResponse?.data?.messageId || null,
+                        provider: 'AiSensy',
+                        aisensy_response: whatsappResponse,
+                        aisensy_message_id: whatsappResponse?.messageId || null
+                    }
+                );
+
+                entry.whatsapp = {
+                    status: 'sent',
+                    response: whatsappResponse,
+                    logId: whatsappLog._id
+                };
             } catch (error) {
+                if (whatsappLog) {
+                    await SmsLog.updateOne(
+                        { _id: whatsappLog._id },
+                        {
+                            status: 'failed',
+                            failed_at: new Date(),
+                            error_message: error.message,
+                            response_payload: error.original?.response?.data || null,
+                            aisensy_response: error.original?.response?.data || null
+                        }
+                    );
+                } else {
+                    whatsappLog = await SmsLog.create({
+                        customer_id: customer.cp_id,
+                        phone_number: phone,
+                        customer_name: firstName,
+                        campaign_name: whatsappCampaignName,
+                        message: smsMessage,
+                        template_params: whatsappPayload.templateParams,
+                        batch_id: requestBatchId,
+                        status: 'failed',
+                        channel: 'whatsapp',
+                        provider: 'AiSensy',
+                        source,
+                        error_message: error.message,
+                        failed_at: new Date()
+                    });
+                }
+
                 entry.whatsapp = {
                     status: 'failed',
-                    error: error.message
+                    error: error.message,
+                    logId: whatsappLog._id
                 };
             }
 
@@ -1217,6 +1349,7 @@ router.post('/notifications/send', async (req, res) => {
 
         res.json({
             success: true,
+            batchId: requestBatchId,
             total: results.length,
             results
         });
@@ -1231,5 +1364,127 @@ router.post('/notifications/send', async (req, res) => {
     }
 });
 
+
+
+// Send SMS and WhatsApp messages to specific customers by customer_profile IDs BY STAGE ID
+// router.post('/notifications/send/stage/:stageId', async (req, res) => {
+//     const { stageId } = req.params;
+//     const { customerIds = [], messageTemplate, whatsappCampaignName = 'Missing Document', source = 'bulk-notification' } = req.body || {};
+
+//     if (!Array.isArray(customerIds) || customerIds.length === 0) {
+//         return res.status(400).json({
+//             success: false,
+//             message: 'customerIds array is required'
+//         });
+//     }
+
+//     try {
+//         const placeholders = customerIds.map(() => '?').join(',');
+//         const query = `
+//             SELECT cp_id, cp_first_name, cp_sur_name, cp_mobile
+//             FROM customer_profile
+//             WHERE cp_id IN (${placeholders})
+//               AND cp_mobile IS NOT NULL
+//               AND cp_mobile <> ''
+//         `;
+
+//         const customers = await executeQuery(query, customerIds);
+
+//         if (!customers || customers.length === 0) {
+//             return res.json({
+//                 success: true,
+//                 message: 'No customers found for provided IDs',
+//                 results: []
+//             });
+//         }
+
+//         const normalizePhone = (mobile) => {
+//             if (!mobile) return null;
+//             let digits = String(mobile).replace(/\D/g, '');
+//             if (digits.length === 10) {
+//                 digits = `91${digits}`;
+//             }
+//             if (digits.length === 12 && digits.startsWith('91')) {
+//                 return digits;
+//             }
+//             return digits.length >= 10 ? digits : null;
+//         };
+
+//         const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/app Thank you for choosing Salary4Sure — Team Salary4Sure`;
+
+//         const results = [];
+
+//         for (const customer of customers) {
+//             const phone = normalizePhone(customer.cp_mobile);
+//             if (!phone) {
+//                 results.push({
+//                     cp_id: customer.cp_id,
+//                     status: 'failed',
+//                     reason: 'Invalid mobile number'
+//                 });
+//                 continue;
+//             }
+
+//             const firstName = customer.cp_first_name || customer.cp_sur_name || 'Customer';
+//             const smsMessage = messageTemplate || defaultMessage(firstName);
+
+//             const whatsappPayload = {
+//                 destination: phone,
+//                 campaignName: whatsappCampaignName,
+//                 userName: 'SALARY4SURE',
+//                 templateParams: [firstName, firstName],
+//                 source,
+//                 paramsFallbackValue: {
+//                     FirstName: firstName
+//                 }
+//             };
+
+//             const entry = {
+//                 cp_id: customer.cp_id,
+//                 phone,
+//                 firstName,
+//                 sms: null,
+//                 whatsapp: null
+//             };
+
+//             try {
+//                 entry.sms = await sendTransactionalSms({
+//                     mobile: phone,
+//                     message: smsMessage
+//                 });
+//             } catch (error) {
+//                 entry.sms = {
+//                     status: 'failed',
+//                     error: error.message
+//                 };
+//             }
+
+//             try {
+//                 entry.whatsapp = await sendWhatsappMessage(whatsappPayload);
+//             } catch (error) {
+//                 entry.whatsapp = {
+//                     status: 'failed',
+//                     error: error.message
+//                 };
+//             }
+
+//             results.push(entry);
+//         }
+
+//         res.json({
+//             success: true,
+//             total: results.length,
+//             results
+//         });
+
+//     } catch (error) {
+//         console.error('Error sending notifications:', error);
+//         res.status(500).json({
+//             success: false,
+//             message: 'Failed to send notifications',
+//             error: error.message
+//         });
+//     }
+// });
 
 export default router;

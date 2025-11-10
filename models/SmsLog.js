@@ -27,7 +27,28 @@ const smsLogSchema = new mongoose.Schema({
         default: null
     },
     
-    // SMS details
+    // Messaging metadata
+    channel: {
+        type: String,
+        enum: ['sms', 'whatsapp', 'both'],
+        default: 'sms',
+        index: true
+    },
+    provider: {
+        type: String,
+        default: 'AiSensy',
+        index: true
+    },
+    source: {
+        type: String,
+        default: 'bulk-sms-api'
+    },
+    userName: {
+        type: String,
+        default: 'SALARY4SURE'
+    },
+    
+    // Message details
     campaign_name: {
         type: String,
         required: true
@@ -56,7 +77,21 @@ const smsLogSchema = new mongoose.Schema({
         index: true
     },
     
-    // AiSensy API response
+    // Provider request/response payloads
+    request_payload: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    response_payload: {
+        type: mongoose.Schema.Types.Mixed,
+        default: null
+    },
+    message_id: {
+        type: String,
+        default: null
+    },
+    
+    // Legacy AiSensy fields (optional)
     aisensy_response: {
         type: mongoose.Schema.Types.Mixed,
         default: null
@@ -77,17 +112,7 @@ const smsLogSchema = new mongoose.Schema({
         index: true
     },
     sent_at: Date,
-    failed_at: Date,
-    
-    // Additional metadata
-    source: {
-        type: String,
-        default: 'bulk-sms-api'
-    },
-    userName: {
-        type: String,
-        default: 'SALARY4SURE'
-    }
+    failed_at: Date
 }, {
     timestamps: true
 });
@@ -97,6 +122,7 @@ smsLogSchema.index({ status: 1, created_at: -1 });
 smsLogSchema.index({ batch_id: 1, status: 1 });
 smsLogSchema.index({ customer_id: 1, created_at: -1 });
 smsLogSchema.index({ journey_stage: 1, status: 1 });
+smsLogSchema.index({ provider: 1, channel: 1 });
 
 const SmsLog = mongoose.model('SmsLog', smsLogSchema);
 

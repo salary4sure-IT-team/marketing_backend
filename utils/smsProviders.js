@@ -11,7 +11,7 @@ const SMS24_DEFAULTS = {
     output: 'json'
 };
 
-export async function sendTransactionalSms({ mobile, message, dltEntityId = '', dltTemplateId = '1707176232483592654' }) {
+export async function sendTransactionalSms({ mobile, message, dltEntityId = '1701174298564123190', dltTemplateId = '1707176232483592654' }) {
     if (!mobile || !message) {
         throw new Error('mobile and message are required for SMS');
     }
