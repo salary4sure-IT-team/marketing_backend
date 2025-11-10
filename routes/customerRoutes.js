@@ -3,6 +3,7 @@ import { executeQuery } from "../config/mysqlDb.js";
 import { v4 as uuidv4 } from 'uuid';
 import SmsLog from "../models/SmsLog.js";
 import { sendSMSViaAiSensy } from "../services/smsService.js";
+import { sendTransactionalSms, sendWhatsappMessage } from "../utils/smsProviders.js";
 
 const router = express.Router();
 
@@ -105,8 +106,7 @@ const router = express.Router();
  */
 router.get("/profile", async (req, res) => {
     try {
-        const { limit = 100, offset = 0, search, startDate, endDate } = req.query;
-        
+        const { limit = 100, offset = 0, search, startDate, endDate } = req.query;        
         // Parse and validate limit/offset
         let limitNum = parseInt(limit) || 100;
         let offsetNum = parseInt(offset) || 0;
@@ -1059,6 +1059,173 @@ router.get('/recent/three-days', async (req, res) => {
         res.status(500).json({
             success: false,
             message: 'Failed to fetch customers from the last three days',
+            error: error.message
+        });
+    }
+});
+
+// Get customers within last three days filtered by journey stage
+router.get('/recent/three-days/stage/:stageId', async (req, res) => {
+    const { stageId } = req.params;
+
+    if (!stageId) {
+        return res.status(400).json({
+            success: false,
+            message: 'stageId parameter is required'
+        });
+    }
+
+    try {
+        const now = new Date();
+        const fromDate = new Date(now);
+        fromDate.setDate(fromDate.getDate() - 2); // include today and previous 2 days
+        fromDate.setHours(0, 0, 0, 0);
+
+        const query = `
+            SELECT *
+            FROM customer_profile
+            WHERE cp_created_at >= ?
+              AND cp_journey_stage = ?
+            ORDER BY cp_created_at DESC
+        `;
+
+        const customers = await executeQuery(query, [fromDate, stageId]);
+
+        res.json({
+            success: true,
+            count: customers.length,
+            range: {
+                from: fromDate,
+                to: now
+            },
+            stageId,
+            data: customers
+        });
+    } catch (error) {
+        console.error('Error fetching recent customers by stage:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch customers from the last three days for the specified stage',
+            error: error.message
+        });
+    }
+});
+
+// Send SMS and WhatsApp messages to specific customers by customer_profile IDs
+router.post('/notifications/send', async (req, res) => {
+    const { customerIds = [], messageTemplate, whatsappCampaignName = 'Missing Document', source = 'bulk-notification' } = req.body || {};
+
+    if (!Array.isArray(customerIds) || customerIds.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'customerIds array is required'
+        });
+    }
+
+    try {
+        const placeholders = customerIds.map(() => '?').join(',');
+        const query = `
+            SELECT cp_id, cp_first_name, cp_sur_name, cp_mobile
+            FROM customer_profile
+            WHERE cp_id IN (${placeholders})
+              AND cp_mobile IS NOT NULL
+              AND cp_mobile <> ''
+        `;
+
+        const customers = await executeQuery(query, customerIds);
+
+        if (!customers || customers.length === 0) {
+            return res.json({
+                success: true,
+                message: 'No customers found for provided IDs',
+                results: []
+            });
+        }
+
+        const normalizePhone = (mobile) => {
+            if (!mobile) return null;
+            let digits = String(mobile).replace(/\D/g, '');
+            if (digits.length === 10) {
+                digits = `91${digits}`;
+            }
+            if (digits.length === 12 && digits.startsWith('91')) {
+                return digits;
+            }
+            return digits.length >= 10 ? digits : null;
+        };
+
+        const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/app Thank you for choosing Salary4Sure — Team Salary4Sure`;
+
+        const results = [];
+
+        for (const customer of customers) {
+            const phone = normalizePhone(customer.cp_mobile);
+            if (!phone) {
+                results.push({
+                    cp_id: customer.cp_id,
+                    status: 'failed',
+                    reason: 'Invalid mobile number'
+                });
+                continue;
+            }
+
+            const firstName = customer.cp_first_name || customer.cp_sur_name || 'Customer';
+            const smsMessage = messageTemplate || defaultMessage(firstName);
+
+            const whatsappPayload = {
+                destination: phone,
+                campaignName: whatsappCampaignName,
+                userName: 'SALARY4SURE',
+                templateParams: [firstName, firstName],
+                source,
+                paramsFallbackValue: {
+                    FirstName: firstName
+                }
+            };
+
+            const entry = {
+                cp_id: customer.cp_id,
+                phone,
+                firstName,
+                sms: null,
+                whatsapp: null
+            };
+
+            try {
+                entry.sms = await sendTransactionalSms({
+                    mobile: phone,
+                    message: smsMessage
+                });
+            } catch (error) {
+                entry.sms = {
+                    status: 'failed',
+                    error: error.message
+                };
+            }
+
+            try {
+                entry.whatsapp = await sendWhatsappMessage(whatsappPayload);
+            } catch (error) {
+                entry.whatsapp = {
+                    status: 'failed',
+                    error: error.message
+                };
+            }
+
+            results.push(entry);
+        }
+
+        res.json({
+            success: true,
+            total: results.length,
+            results
+        });
+
+    } catch (error) {
+        console.error('Error sending notifications:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to send notifications',
             error: error.message
         });
     }
