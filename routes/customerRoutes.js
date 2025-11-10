@@ -1028,5 +1028,41 @@ router.get("/sms-logs", async (req, res) => {
     }
 });
 
+// Get customers created within the last 3 calendar days (inclusive)
+router.get('/recent/three-days', async (req, res) => {
+    try {
+        const now = new Date();
+        const fromDate = new Date(now);
+        fromDate.setDate(fromDate.getDate() - 2); // include today and previous 2 days
+        fromDate.setHours(0, 0, 0, 0);
+
+        const query = `
+            SELECT *
+            FROM customer_profile
+            WHERE cp_created_at >= ?
+            ORDER BY cp_created_at DESC
+        `;
+
+        const customers = await executeQuery(query, [fromDate]);
+
+        res.json({
+            success: true,
+            count: customers.length,
+            range: {
+                from: fromDate,
+                to: now
+            },
+            data: customers
+        });
+    } catch (error) {
+        console.error('Error fetching recent customers:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch customers from the last three days',
+            error: error.message
+        });
+    }
+});
+
 
 export default router;
