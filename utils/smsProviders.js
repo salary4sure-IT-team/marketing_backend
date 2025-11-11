@@ -2,8 +2,8 @@ import axios from 'axios';
 
 const SMS24_BASE_URL = 'https://smpp1.sms24hours.com/SMSApi/send';
 const SMS24_DEFAULTS = {
-    userid: 'Salary4SureOTP',
-    password: 'YtC5UYnf',
+    userid: process.env.SMSUSERID,
+    password: process.env.SMSPASS,
     sendMethod: 'quick',
     senderid: 'SLRYFS',
     msgType: 'text',
@@ -37,6 +37,7 @@ export async function sendTransactionalSms({ mobile, message, dltEntityId = '170
                 Cookie: 'SERVERID=webC1'
             }
         });
+        console.log(response.data);
         return response.data;
     } catch (error) {
         const err = new Error('SMS API request failed');
@@ -46,7 +47,7 @@ export async function sendTransactionalSms({ mobile, message, dltEntityId = '170
 }
 
 const AISENSY_URL = 'https://backend.aisensy.com/campaign/t1/api/v2';
-const AISENSY_API_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjY4OTE5YTI5MTU0YTU3MGMwZDMyMTdhZCIsIm5hbWUiOiJTQUxBUlk0U1VSRSIsImFwcE5hbWUiOiJBaVNlbnN5IiwiY2xpZW50SWQiOiI2ODdmNTNkNTk0OTUwYzBjMGEyOTc5ZWMiLCJhY3RpdmVQbGFuIjoiRlJFRV9GT1JFVkVSIiwiaWF0IjoxNzU0MzcyNjQ5fQ.yzCbaZUtKDYOel6Bb0BLWNZ7dIAuxrFfQAwVo7WDY_c';
+const AISENSY_API_KEY = process.env.AISENSY_API_KEY;
 
 export async function sendWhatsappMessage({ destination, campaignName, templateParams = [], source, userName = 'SALARY4SURE', media = {}, buttons = [], carouselCards = [], location = {}, attributes = {}, paramsFallbackValue = {} }) {
     if (!destination || !campaignName) {
