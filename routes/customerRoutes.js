@@ -1214,7 +1214,7 @@ router.post('/notifications/send', async (req, res) => {
                 });
 
                 const smsResponse = await sendTransactionalSms({
-                    mobile: phone,
+                    mobile: customer.cp_mobile,
                     message: smsMessage
                 });
 
