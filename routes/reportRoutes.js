@@ -683,5 +683,61 @@ router.get("/leads/disbursed-instant", async (req, res) => {
     }
 });
 
+// Get marketing leads for specific utm_campaigns within a date range
+router.get('/leads/marketing-campaign', async (req, res) => {
+    try {
+        const { startDate, endDate } = req.query;
+
+        if (!startDate || !endDate) {
+            return res.status(400).json({
+                success: false,
+                message: 'startDate and endDate are required (format: YYYY-MM-DD)'
+            });
+        }
+
+        const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+        if (!dateRegex.test(startDate) || !dateRegex.test(endDate)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Date format must be YYYY-MM-DD'
+            });
+        }
+
+        const campaigns = ['120237694054960170', '120239093541620170'];
+        const placeholders = campaigns.map(() => '?').join(',');
+
+        const query = `
+            SELECT *
+            FROM leads
+            WHERE DATE(created_on) BETWEEN ? AND ?
+              AND utm_source = 'MARKETING'
+              AND utm_campaign IN (${placeholders})
+            ORDER BY created_on DESC
+        `;
+
+        const params = [startDate, endDate, ...campaigns];
+        const leads = await executeQuery(query, params);
+
+        res.json({
+            success: true,
+            count: leads.length,
+            dateRange: {
+                startDate,
+                endDate
+            },
+            campaigns,
+            data: leads
+        });
+
+    } catch (error) {
+        console.error('Error fetching marketing campaign leads:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch marketing campaign leads',
+            error: error.message
+        });
+    }
+});
+
 
 export default router;
