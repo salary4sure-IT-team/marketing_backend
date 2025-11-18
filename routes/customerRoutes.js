@@ -202,7 +202,7 @@ router.get("/profile", async (req, res) => {
     }
 });
 
-/**
+/** 
  * @swagger
  * /api/customers/profile/{id}:
  *   get:
@@ -598,7 +598,7 @@ router.get("/by-journey-stage/:stageId", async (req, res) => {
         // Create a map of customer_id to latest SMS log
         const smsStatusMap = new Map();
         smsLogs.forEach(log => {
-            if (!smsStatusMap.has(log.customer_id)) {
+            if (!smsStatusMap.has(log.customer_id)) {  
                 smsStatusMap.set(log.customer_id, {
                     sms_sent: true,
                     sms_sent_at: log.sent_at || log.created_at,
@@ -1288,6 +1288,296 @@ router.post('/notifications/send', async (req, res) => {
                 });
 
                 const whatsappResponse = await sendWhatsappMessage(whatsappPayload);
+
+                await SmsLog.updateOne(
+                    { _id: whatsappLog._id },
+                    {
+                        status: 'sent',
+                        sent_at: new Date(),
+                        response_payload: whatsappResponse,
+                        message_id: whatsappResponse?.messageId || whatsappResponse?.data?.messageId || null,
+                        provider: 'AiSensy',
+                        aisensy_response: whatsappResponse,
+                        aisensy_message_id: whatsappResponse?.messageId || null
+                    }
+                );
+
+                entry.whatsapp = {
+                    status: 'sent',
+                    response: whatsappResponse,
+                    logId: whatsappLog._id
+                };
+            } catch (error) {
+                if (whatsappLog) {
+                    await SmsLog.updateOne(
+                        { _id: whatsappLog._id },
+                        {
+                            status: 'failed',
+                            failed_at: new Date(),
+                            error_message: error.message,
+                            response_payload: error.original?.response?.data || null,
+                            aisensy_response: error.original?.response?.data || null
+                        }
+                    );
+                } else {
+                    whatsappLog = await SmsLog.create({
+                        customer_id: customer.cp_id,
+                        phone_number: phone,
+                        customer_name: firstName,
+                        campaign_name: whatsappCampaignName,
+                        message: smsMessage,
+                        template_params: whatsappPayload.templateParams,
+                        batch_id: requestBatchId,
+                        status: 'failed',
+                        channel: 'whatsapp',
+                        provider: 'AiSensy',
+                        source,
+                        error_message: error.message,
+                        failed_at: new Date()
+                    });
+                }
+
+                entry.whatsapp = {
+                    status: 'failed',
+                    error: error.message,
+                    logId: whatsappLog._id
+                };
+            }
+
+            results.push(entry);
+        }
+
+        res.json({
+            success: true,
+            batchId: requestBatchId,
+            total: results.length,
+            results
+        });
+
+    } catch (error) {
+        console.error('Error sending notifications:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to send notifications',
+            error: error.message
+        });
+    }
+});
+
+
+
+
+// Send SMS and WhatsApp messages to all customer within 3day and are not rejectd also not on thank you 
+router.post('/notifications/send/all', async (req, res) => {
+
+    // stageIds is an array of stage ids in string format
+    let stageIds = req.body.stageIds || [];
+
+    console.log(stageIds);
+
+
+    if (!stageIds.length) {
+        return res.status(400).json({
+            success: false,
+            message: "stageIds cannot be empty"
+        });
+    }
+
+    const { messageTemplate, whatsappCampaignName = 'Missing Document', source = 'bulk-notification' } = req.body || {};
+
+    if (!messageTemplate || !whatsappCampaignName || !source) {
+        return res.status(400).json({
+            success: false,
+            message: 'messageTemplate, whatsappCampaignName, and source are required'
+        });
+    }
+
+   
+
+    try {
+    
+//         const query = `
+//             SELECT cp_id, cp_first_name, cp_sur_name, cp_mobile
+// FROM customer_profile
+// WHERE cp_mobile IS NOT NULL
+//   AND cp_mobile <> ''
+//   AND DATE(created_at) >= DATE(NOW() - INTERVAL 3 DAY)
+//   AND cp_journey_stage IN (${stageIds.join(',')}); 
+//         `;
+
+//         const customers = await executeQuery(query,[]);
+
+const placeholders = stageIds.map(() => '?').join(',');
+const query = `
+  SELECT cp_id, cp_first_name, cp_sur_name, cp_mobile
+  FROM customer_profile
+  WHERE cp_mobile IS NOT NULL
+    AND cp_mobile <> ''
+    AND DATE(cp_created_at) >= DATE(NOW() - INTERVAL 3 DAY)
+    AND cp_journey_stage IN (${placeholders});
+`;
+
+const customers = await executeQuery(query, stageIds);
+
+
+        if (!customers || customers.length === 0) {
+            return res.json({
+                success: true,
+                message: 'No customers found for provided IDs',
+                results: []
+            });
+        }
+
+        const normalizePhone = (mobile) => {
+            if (!mobile) return null;
+            let digits = String(mobile).replace(/\D/g, '');
+            if (digits.length === 10) {
+                digits = `91${digits}`;
+            }
+            if (digits.length === 12 && digits.startsWith('91')) {
+                return digits;
+            }
+            return digits.length >= 10 ? digits : null;
+        };
+
+        const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/app Thank you for choosing Salary4Sure — Team Salary4Sure`;
+
+        const results = [];
+        const requestBatchId = `single-${uuidv4()}`;
+
+        for (const customer of customers) {
+            const phone = normalizePhone(customer.cp_mobile);
+            if (!phone) {
+                results.push({
+                    cp_id: customer.cp_id,
+                    status: 'failed',
+                    reason: 'Invalid mobile number'
+                });
+                continue;
+            }
+
+            const firstName = customer.cp_first_name || customer.cp_sur_name || 'Customer';
+            const smsMessage = messageTemplate || defaultMessage(firstName);
+
+            const whatsappPayload = {
+                destination: phone,
+                campaignName: whatsappCampaignName,
+                userName: 'SALARY4SURE',
+                templateParams: [firstName, `${customer.cp_id}`],
+                source,
+                paramsFallbackValue: {
+                    FirstName: firstName,
+                    CustomerId: `${customer.cp_id}`
+                }
+            };
+
+            const entry = {
+                cp_id: customer.cp_id,
+                phone,
+                firstName,
+                sms: null,
+                whatsapp: null
+            };
+
+            let smsLog = null;
+            try {
+                smsLog = await SmsLog.create({
+                    customer_id: customer.cp_id,
+                    phone_number: phone,
+                    customer_name: firstName,
+                    campaign_name: whatsappCampaignName,
+                    message: smsMessage,
+                    template_params: [],
+                    batch_id: requestBatchId,
+                    status: 'pending',
+                    channel: 'sms',
+                    provider: 'SMS24',
+                    source,
+                    request_payload: {
+                        mobile: phone,
+                        message: smsMessage
+                    }
+                });
+
+                const smsResponse = 
+                // null;
+                await sendTransactionalSms({
+                    mobile: customer.cp_mobile,
+                    message: smsMessage
+                });
+
+                await SmsLog.updateOne(
+                    { _id: smsLog._id },
+                    {
+                        status: 'sent',
+                        sent_at: new Date(),
+                        response_payload: smsResponse,
+                        message_id: smsResponse?.messageid || smsResponse?.messageId || null,
+                        provider: 'SMS24'
+                    }
+                );
+
+                entry.sms = {
+                    status: 'sent',
+                    response: smsResponse,
+                    logId: smsLog._id
+                };
+            } catch (error) {
+                if (smsLog) {
+                    await SmsLog.updateOne(
+                        { _id: smsLog._id },
+                        {
+                            status: 'failed',
+                            failed_at: new Date(),
+                            error_message: error.message,
+                            response_payload: error.original?.response?.data || null
+                        }
+                    );
+                } else {
+                    smsLog = await SmsLog.create({
+                        customer_id: customer.cp_id,
+                        phone_number: phone,
+                        customer_name: firstName,
+                        campaign_name: whatsappCampaignName,
+                        message: smsMessage,
+                        template_params: [],
+                        batch_id: requestBatchId,
+                        status: 'failed',
+                        channel: 'sms',
+                        provider: 'SMS24',
+                        source,
+                        error_message: error.message,
+                        failed_at: new Date()
+                    });
+                }
+
+                entry.sms = {
+                    status: 'failed',
+                    error: error.message,
+                    logId: smsLog._id
+                };
+            }
+
+            let whatsappLog = null;
+            try {
+                whatsappLog = await SmsLog.create({
+                    customer_id: customer.cp_id,
+                    phone_number: phone,
+                    customer_name: firstName,
+                    campaign_name: whatsappCampaignName,
+                    message: smsMessage,
+                    template_params: whatsappPayload.templateParams,
+                    batch_id: requestBatchId,
+                    status: 'pending',
+                    channel: 'whatsapp',
+                    provider: 'AiSensy',
+                    source,
+                    request_payload: whatsappPayload
+                });
+
+                const whatsappResponse = 
+                // null;
+                await sendWhatsappMessage(whatsappPayload);
 
                 await SmsLog.updateOne(
                     { _id: whatsappLog._id },
