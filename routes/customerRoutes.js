@@ -1440,7 +1440,7 @@ const customers = await executeQuery(query, stageIds);
             return digits.length >= 10 ? digits : null;
         };
 
-        const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/app Thank you for choosing Salary4Sure — Team Salary4Sure`;
+        const defaultMessage = (name) => `Hi ${name || 'Customer'}, your application is almost ready! Please upload the remaining documents to complete your application process. Upload now: https://salary4sure.com/apply-now Thank you for choosing Salary4Sure — Team Salary4Sure`;
 
         const results = [];
         const requestBatchId = `single-${uuidv4()}`;
@@ -1456,8 +1456,8 @@ const customers = await executeQuery(query, stageIds);
                 continue;
             }
 
-            const firstName = customer.cp_first_name || customer.cp_sur_name || 'Customer';
-            const smsMessage = messageTemplate || defaultMessage(firstName);
+            const firstName = customer.cp_first_name || 'Customer';
+            const smsMessage =  defaultMessage(firstName);
 
             const whatsappPayload = {
                 destination: phone,
@@ -1654,7 +1654,32 @@ const customers = await executeQuery(query, stageIds);
     }
 });
 
+// Sms logs list
+router.get('/sms-logs-list', async (req, res) => {
+    const { page = 1, limit = 100 } = req.query;
+    const { search = '', status = '', channel = '', provider = '', source = '', campaignName = '', customerName = '', phoneNumber = '', templateParams = '' } = req.query;
+    const { startDate = '', endDate = '' } = req.query;
+    const { sort = 'createdAt', order = 'desc' } = req.query;
+    const { fields = '' } = req.query;
+    const { populate = '' } = req.query;
 
+    try {
+        const allSmsLogs = await SmsLog.find({});
+        const total = await SmsLog.countDocuments({});
+        res.json({
+            success: true,
+            data: allSmsLogs,
+            total: total
+        });
+    } catch (error) {
+        console.error('Error fetching SMS logs:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Failed to fetch SMS logs',
+            error: error.message
+        });
+    }
+});
 
 // Send SMS and WhatsApp messages to specific customers by customer_profile IDs BY STAGE ID
 // router.post('/notifications/send/stage/:stageId', async (req, res) => {
