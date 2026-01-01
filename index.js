@@ -13,6 +13,7 @@ import exampleRoutes from "./routes/exampleRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
 import instantLeadRoutes from "./routes/instantLeadRoutes.js";
+import customerDetailsBefore1MarchRoutes from "./routes/customerDetailsBefore1MarchRoutes.js";
 
 const PORT = process.env.PORT || 3000;
 
@@ -102,6 +103,9 @@ app.use("/api/reports", reportRoutes);
 
 // Instant form leads routes for Excel upload and processing
 app.use("/api/instant-leads", instantLeadRoutes);
+
+// Cutomer details before 1 march 
+app.use("/api/v1/customer-details-before-1-march", customerDetailsBefore1MarchRoutes);
 
 /**
  * @swagger
