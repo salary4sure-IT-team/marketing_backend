@@ -34,6 +34,8 @@ var corsOption = {
         "https://marketing.salary4sure.com",
         "http://api2.salary4sure.com",
         "https://api2.salary4sure.com",
+      "https://lm.salary4sure.com" ,
+      "http://localhost:5174" 
     ],
     methods: "GET,HEAD,PUT,PATCH,POST,DELETE",
     credentials: true,
